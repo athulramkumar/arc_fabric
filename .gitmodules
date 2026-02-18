@@ -1,0 +1,12 @@
+[submodule "models/wan21"]
+	path = models/wan21
+	url = https://github.com/athulramkumar/Wan2.1.git
+[submodule "models/inferix"]
+	path = models/inferix
+	url = https://github.com/athulramkumar/Inferix.git
+[submodule "models/ltx_video"]
+	path = models/ltx_video
+	url = https://github.com/athulramkumar/LTX-Video.git
+[submodule "models/longlive"]
+	path = models/longlive
+	url = https://github.com/athulramkumar/LongLive.git

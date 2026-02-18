@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arc Fabric</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#09090b;--surface:#111113;--surface2:#18181b;--surface3:#1f1f23;
+  --border:#27272a;--border2:#3f3f46;
+  --text:#fafafa;--text2:#a1a1aa;--text3:#71717a;
+  --accent:#7c3aed;--accent2:#8b5cf6;--accent-bg:rgba(124,58,237,.08);
+  --green:#22c55e;--green-bg:rgba(34,197,94,.12);
+  --orange:#f59e0b;--orange-bg:rgba(245,158,11,.12);
+  --red:#ef4444;--red-bg:rgba(239,68,68,.12);
+  --radius:10px;--radius-lg:14px;
+}
+body{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+a{color:var(--accent2);text-decoration:none}
+
+/* Layout */
+.app{display:flex;flex-direction:column;height:100vh}
+header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface)}
+.logo{font-size:20px;font-weight:700;letter-spacing:-.3px}
+.logo span{color:var(--accent2)}
+.gpu-bar{display:flex;gap:8px}
+.gpu-chip{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);font-size:11px;font-weight:500;color:var(--text2)}
+.gpu-chip .dot{width:7px;height:7px;border-radius:50%}
+.gpu-chip .dot.free{background:var(--green)}.gpu-chip .dot.occupied{background:var(--orange)}
+
+.main{display:flex;flex:1;overflow:hidden}
+
+/* Sidebar */
+.sidebar{display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--surface);overflow-y:auto;min-width:300px;max-width:340px;flex-shrink:0}
+.section{padding:16px 20px;border-bottom:1px solid var(--border)}
+.section:last-child{border-bottom:none;flex:1}
+.section-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--text3);margin-bottom:10px}
+
+/* Models */
+.model-list{display:flex;flex-direction:column;gap:6px}
+.model-card{display:flex;align-items:start;gap:10px;padding:10px 12px;border-radius:var(--radius);border:1.5px solid transparent;background:var(--surface2);cursor:pointer;transition:all .12s}
+.model-card:hover{border-color:var(--border2);background:var(--surface3)}
+.model-card.selected{border-color:var(--accent);background:var(--accent-bg)}
+.model-card .info{flex:1;min-width:0}
+.model-card .name{font-size:13px;font-weight:600;line-height:1.3}
+.model-card .desc{font-size:11px;color:var(--text3);line-height:1.4;margin-top:2px}
+.badge{font-size:9px;font-weight:700;padding:2px 7px;border-radius:8px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.badge.cold{background:var(--surface3);color:var(--text3)}
+.badge.warm{background:var(--green-bg);color:var(--green)}
+.badge.warming{background:var(--orange-bg);color:var(--orange)}
+.badge.error{background:var(--red-bg);color:var(--red)}
+
+/* Params */
+.param-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.param-group{display:flex;flex-direction:column;gap:3px}
+.param-group.full{grid-column:1/-1}
+.param-group label{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.param-group input,.param-group textarea{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit;outline:none;transition:border .12s}
+.param-group input:focus,.param-group textarea:focus{border-color:var(--accent)}
+.param-group textarea{resize:vertical;min-height:72px;line-height:1.5}
+
+.gen-btn{width:100%;padding:12px;border:none;border-radius:var(--radius);background:var(--accent);color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:all .15s;margin-top:6px}
+.gen-btn:hover{background:var(--accent2)}
+.gen-btn:disabled{opacity:.4;cursor:not-allowed}
+.gen-btn.running{background:var(--orange);animation:pulse 1.8s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.65}}
+
+/* Output panel */
+.output{display:flex;flex-direction:column;overflow-y:auto;background:var(--bg);flex:1;min-width:0}
+.output-inner{padding:24px;display:flex;flex-direction:column;gap:20px;max-width:960px;margin:0 auto;width:100%}
+
+.video-box{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+.video-box video{width:100%;height:100%;object-fit:contain;display:block}
+.video-box .placeholder{text-align:center;color:var(--text3)}
+.video-box .placeholder svg{width:48px;height:48px;opacity:.25;margin-bottom:10px}
+.video-box .placeholder p{font-size:13px}
+
+.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(9,9,11,.88);z-index:10}
+.spinner{width:36px;height:36px;border:3px solid var(--border);border-top:3px solid var(--accent2);border-radius:50%;animation:spin .7s linear infinite;margin-bottom:14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.overlay .label{color:var(--text2);font-size:13px}
+.overlay .timer{color:var(--accent2);font-size:22px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums}
+
+.meta-row{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text3)}
+.meta-row strong{color:var(--text2)}
+
+/* Log box */
+.log-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);max-height:180px;overflow-y:auto}
+.log-header{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;position:sticky;top:0;background:var(--surface);z-index:1}
+.log-content{padding:8px 12px;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:11px;line-height:1.6;color:var(--text3);white-space:pre-wrap;word-break:break-all}
+
+/* History */
+.history-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--text3);margin-bottom:10px}
+.history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.history-item{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;cursor:pointer;transition:border .12s}
+.history-item:hover{border-color:var(--accent)}
+.history-item video{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}
+.history-item .info{padding:8px 10px}
+.history-item .prompt-text{font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.history-item .detail{font-size:10px;color:var(--text3);margin-top:2px}
+
+.empty{color:var(--text3);font-size:12px}
+
+@media(max-width:600px){.main{flex-direction:column}.sidebar{max-width:none;min-width:0;border-right:none;border-bottom:1px solid var(--border)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">Arc <span>Fabric</span></div>
+    <div class="gpu-bar" id="gpuBar"></div>
+  </header>
+  <div class="main">
+    <div class="sidebar">
+      <div class="section">
+        <div class="section-title">Model</div>
+        <div class="model-list" id="modelList"></div>
+      </div>
+      <div class="section">
+        <div class="section-title">Parameters</div>
+        <div class="param-grid">
+          <div class="param-group full">
+            <label>Prompt</label>
+            <textarea id="prompt">A golden retriever running joyfully on a sunny beach, waves crashing in the background, cinematic lighting</textarea>
+          </div>
+          <div class="param-group"><label>Width</label><input type="number" id="width" value="832"></div>
+          <div class="param-group"><label>Height</label><input type="number" id="height" value="480"></div>
+          <div class="param-group"><label>Frames</label><input type="number" id="numFrames" value="33"></div>
+          <div class="param-group"><label>Seed</label><input type="number" id="seed" value="42"></div>
+        </div>
+      </div>
+      <div class="section">
+        <button class="gen-btn" id="genBtn" onclick="generate()">Generate Video</button>
+      </div>
+    </div>
+    <div class="output">
+      <div class="output-inner">
+        <div class="video-box" id="videoBox">
+          <div class="placeholder" id="placeholder">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <p>Select a model and hit Generate</p>
+          </div>
+        </div>
+        <div class="meta-row" id="jobMeta"></div>
+        <div class="log-box" id="logBox" style="display:none">
+          <div class="log-header"><span>Generation Log</span></div>
+          <div class="log-content" id="logContent"></div>
+        </div>
+        <div>
+          <div class="history-title">Recent Generations</div>
+          <div class="history-grid" id="historyGrid"><div class="empty">No videos generated yet</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let selectedModel = null;
+let currentJobId = null;
+let startTime = null;
+let timerInterval = null;
+let modelsData = [];
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+async function loadModels() {
+  modelsData = await fetchJSON('/api/models');
+  const list = $('#modelList');
+  list.innerHTML = modelsData.map(m => `
+    <div class="model-card${selectedModel===m.id?' selected':''}" data-id="${m.id}" onclick="selectModel('${m.id}')">
+      <div class="info">
+        <div class="name">${m.display_name}</div>
+        <div class="desc">${m.description}</div>
+      </div>
+      <div class="badge ${m.status}">${m.status}${m.gpu_id!==null?' (GPU '+m.gpu_id+')':''}</div>
+    </div>
+  `).join('');
+  if (!selectedModel && modelsData.length) selectModel(modelsData[0].id);
+}
+
+function selectModel(id) {
+  selectedModel = id;
+  const m = modelsData.find(x => x.id === id);
+  if (!m) return;
+  $('#width').value = m.defaults.width;
+  $('#height').value = m.defaults.height;
+  $('#numFrames').value = m.defaults.num_frames;
+  document.querySelectorAll('.model-card').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === id);
+  });
+}
+
+async function loadGPUs() {
+  const gpus = await fetchJSON('/api/gpus');
+  $('#gpuBar').innerHTML = gpus.map(g => `
+    <div class="gpu-chip">
+      <div class="dot ${g.status}"></div>
+      <span>GPU ${g.gpu_id}${g.model_name ? ': '+g.model_name : ''}</span>
+    </div>
+  `).join('');
+}
+
+async function generate() {
+  if (!selectedModel) return;
+  const btn = $('#genBtn');
+  btn.disabled = true;
+  btn.className = 'gen-btn running';
+  btn.textContent = 'Generating...';
+
+  const body = {
+    model_id: selectedModel,
+    prompt: $('#prompt').value,
+    width: +$('#width').value,
+    height: +$('#height').value,
+    num_frames: +$('#numFrames').value,
+    seed: +$('#seed').value,
+  };
+
+  const data = await fetchJSON('/api/generate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  currentJobId = data.job_id;
+  startTime = Date.now();
+
+  showOverlay('Loading model...');
+  startTimer();
+  pollJob();
+  loadModels(); loadGPUs();
+}
+
+function showOverlay(text) {
+  const box = $('#videoBox');
+  const ph = $('#placeholder');
+  if (ph) ph.style.display = 'none';
+
+  let ov = box.querySelector('.overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.className = 'overlay';
+    box.appendChild(ov);
+  }
+  ov.innerHTML = `<div class="spinner"></div><div class="label">${text}</div><div class="timer">0.0s</div>`;
+  ov.style.display = 'flex';
+
+  // Show log box
+  $('#logBox').style.display = 'block';
+  $('#logContent').textContent = 'Waiting for process to start...\n';
+}
+
+function hideOverlay() {
+  const ov = document.querySelector('.overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+function startTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    const el = document.querySelector('.overlay .timer');
+    if (el && startTime) {
+      el.textContent = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+    }
+  }, 100);
+}
+
+function stopTimer() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+}
+
+async function pollJob() {
+  if (!currentJobId) return;
+  const job = await fetchJSON(`/api/jobs/${currentJobId}`);
+
+  const ov = document.querySelector('.overlay');
+  if (ov && ov.style.display !== 'none') {
+    const label = ov.querySelector('.label');
+    if (job.status === 'running') label.textContent = 'Generating video...';
+    else if (job.status === 'queued') label.textContent = 'Queued...';
+  }
+
+  // Fetch logs
+  try {
+    const logData = await fetchJSON(`/api/logs/${currentJobId}`);
+    if (logData.log) {
+      const logEl = $('#logContent');
+      logEl.textContent = logData.log;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  } catch(e) {}
+
+  if (job.status === 'completed') {
+    stopTimer();
+    hideOverlay();
+    showVideo(job);
+    resetBtn();
+    loadModels(); loadGPUs(); loadHistory();
+    return;
+  }
+  if (job.status === 'failed') {
+    stopTimer();
+    showError(job.error);
+    resetBtn();
+    loadModels(); loadGPUs();
+    return;
+  }
+
+  setTimeout(pollJob, 2000);
+}
+
+function showVideo(job) {
+  const box = $('#videoBox');
+  let video = box.querySelector('video');
+  if (!video) {
+    video = document.createElement('video');
+    video.controls = true;
+    video.autoplay = true;
+    video.loop = true;
+    box.appendChild(video);
+  }
+  video.src = job.output_path + '?t=' + Date.now();
+  video.style.display = 'block';
+
+  const m = modelsData.find(x => x.id === job.model_id);
+  $('#jobMeta').innerHTML = `
+    <span>Model: <strong>${m ? m.display_name : job.model_id}</strong></span>
+    <span>Time: <strong>${job.elapsed?.toFixed(1)}s</strong></span>
+    <span>Seed: <strong>${$('#seed').value}</strong></span>
+  `;
+}
+
+function showError(error) {
+  const box = $('#videoBox');
+  let ov = box.querySelector('.overlay');
+  if (!ov) { ov = document.createElement('div'); ov.className = 'overlay'; box.appendChild(ov); }
+  ov.style.display = 'flex';
+  ov.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+    <div style="color:var(--red);font-size:14px;font-weight:600;margin-top:12px">Generation Failed</div>
+    <div style="color:var(--text3);font-size:12px;margin-top:6px;max-width:500px;text-align:center;line-height:1.5">${(error||'').substring(0,300)}</div>
+  `;
+}
+
+function resetBtn() {
+  const btn = $('#genBtn');
+  btn.disabled = false;
+  btn.className = 'gen-btn';
+  btn.textContent = 'Generate Video';
+}
+
+async function loadHistory() {
+  const allJobs = await fetchJSON('/api/jobs');
+  const completed = allJobs.filter(j => j.status === 'completed' && j.output_path);
+  const grid = $('#historyGrid');
+  if (!completed.length) { grid.innerHTML = '<div class="empty">No videos generated yet</div>'; return; }
+  grid.innerHTML = completed.slice(0, 12).map(j => {
+    const m = modelsData.find(x => x.id === j.model_id);
+    return `
+    <div class="history-item" onclick="replayVideo('${j.output_path}','${(j.prompt||'').replace(/'/g,"\\'")}','${m?m.display_name:j.model_id}',${j.elapsed||0})">
+      <video src="${j.output_path}" muted preload="metadata"></video>
+      <div class="info">
+        <div class="prompt-text">${j.prompt||''}</div>
+        <div class="detail">${m?m.display_name:j.model_id} &middot; ${(j.elapsed||0).toFixed(1)}s</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function replayVideo(path, prompt, name, elapsed) {
+  hideOverlay();
+  const box = $('#videoBox');
+  let video = box.querySelector('video');
+  if (!video) { video = document.createElement('video'); video.controls=true; video.autoplay=true; video.loop=true; box.appendChild(video); }
+  video.src = path;
+  video.style.display = 'block';
+  $('#jobMeta').innerHTML = `<span>Model: <strong>${name}</strong></span><span>Time: <strong>${elapsed.toFixed(1)}s</strong></span>`;
+  $('#logBox').style.display = 'none';
+}
+
+loadModels(); loadGPUs(); loadHistory();
+setInterval(() => { loadModels(); loadGPUs(); }, 8000);
+</script>
+</body>
+</html>

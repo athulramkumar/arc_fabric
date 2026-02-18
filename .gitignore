@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.env
+.venv
+env/
+venv/
+
+# Model weights (too large for git)
+weights/
+
+# Generated outputs
+outputs/
+
+# Conda envs (portable, but too large for git)
+envs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
