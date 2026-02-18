@@ -1,11 +1,13 @@
 """
 Arc Fabric UI Server
-A fal.ai-style web interface for video generation with multiple models.
-Serves both the API and the static frontend.
+Persistent model workers stay loaded in GPU between generations.
+Each model runs as a long-lived FastAPI subprocess in its own conda env.
 """
 
 import logging
 import os
+import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -14,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import requests as http_requests
 import uvicorn
 import yaml
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -29,6 +32,7 @@ OUTPUTS = ROOT / "outputs" / "ui"
 OUTPUTS.mkdir(parents=True, exist_ok=True)
 
 GPU_COUNT = int(os.environ.get("ARC_GPU_COUNT", "2"))
+WORKER_BASE_PORT = 9100
 
 
 class ModelStatus(str, Enum):
@@ -50,8 +54,11 @@ class ModelInfo:
     default_frames: int
     default_steps: int
     fps: int
+    worker_script: str
     status: ModelStatus = ModelStatus.COLD
     gpu_id: Optional[int] = None
+    worker_port: Optional[int] = None
+    worker_proc: Optional[subprocess.Popen] = None
     last_used: float = 0.0
     error_msg: Optional[str] = None
 
@@ -60,11 +67,12 @@ MODELS: dict[str, ModelInfo] = {
     "wan21_1_3b": ModelInfo(
         id="wan21_1_3b",
         display_name="Wan 2.1 — 1.3B",
-        description="Fast text-to-video diffusion model. Good quality at 480p with 50-step sampling.",
+        description="Fast text-to-video diffusion model. Good quality at 480p with 30-step sampling.",
         conda_env=str(ROOT / "envs" / "af-wan21"),
         gpu_memory_gb=8.0,
         default_height=480, default_width=832,
         default_frames=33, default_steps=30, fps=16,
+        worker_script=str(ROOT / "workers" / "wan21_worker.py"),
     ),
     "longlive": ModelInfo(
         id="longlive",
@@ -74,6 +82,7 @@ MODELS: dict[str, ModelInfo] = {
         gpu_memory_gb=25.0,
         default_height=480, default_width=832,
         default_frames=30, default_steps=4, fps=16,
+        worker_script=str(ROOT / "workers" / "longlive_worker.py"),
     ),
     "ltx_2b": ModelInfo(
         id="ltx_2b",
@@ -83,12 +92,151 @@ MODELS: dict[str, ModelInfo] = {
         gpu_memory_gb=26.0,
         default_height=480, default_width=704,
         default_frames=97, default_steps=8, fps=24,
+        worker_script=str(ROOT / "workers" / "ltx_worker.py"),
     ),
 }
 
 gpu_assignments: dict[int, Optional[str]] = {i: None for i in range(GPU_COUNT)}
+_next_port = WORKER_BASE_PORT
 
 
+# ---------------------------------------------------------------------------
+# Worker lifecycle
+# ---------------------------------------------------------------------------
+def _get_next_port() -> int:
+    global _next_port
+    port = _next_port
+    _next_port += 1
+    return port
+
+
+def _start_worker(model: ModelInfo, gpu_id: int) -> bool:
+    """Start a persistent worker subprocess for a model on a specific GPU."""
+    python = str(Path(model.conda_env) / "bin" / "python")
+    port = _get_next_port()
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    log_dir = OUTPUTS / "_workers"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{model.id}.log"
+
+    cmd = [python, model.worker_script, "--port", str(port), "--model-name", model.id]
+    logger.info(f"Starting worker for {model.id} on GPU {gpu_id}, port {port}")
+
+    log_file = open(log_path, "w")
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT,
+        cwd=str(ROOT),
+    )
+
+    model.worker_proc = proc
+    model.worker_port = port
+    model.gpu_id = gpu_id
+    model.status = ModelStatus.WARMING
+
+    # Wait for worker to become healthy
+    url = f"http://127.0.0.1:{port}/health"
+    deadline = time.time() + 180  # 3 min timeout for model loading
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            model.status = ModelStatus.ERROR
+            model.error_msg = f"Worker crashed (exit {proc.returncode})"
+            try:
+                model.error_msg += "\n" + log_path.read_text()[-1000:]
+            except Exception:
+                pass
+            logger.error(f"Worker {model.id} crashed: {model.error_msg}")
+            return False
+        try:
+            r = http_requests.get(url, timeout=2)
+            if r.status_code == 200 and r.json().get("status") == "ready":
+                model.status = ModelStatus.WARM
+                model.last_used = time.time()
+                logger.info(f"Worker {model.id} is ready on port {port}")
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+
+    model.status = ModelStatus.ERROR
+    model.error_msg = "Worker startup timed out"
+    _kill_worker(model)
+    return False
+
+
+def _kill_worker(model: ModelInfo):
+    """Kill a worker subprocess and free resources."""
+    if model.worker_proc:
+        try:
+            os.kill(model.worker_proc.pid, signal.SIGTERM)
+            model.worker_proc.wait(timeout=10)
+        except Exception:
+            try:
+                os.kill(model.worker_proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+    model.worker_proc = None
+    model.worker_port = None
+    model.status = ModelStatus.COLD
+    model.error_msg = None
+    logger.info(f"Worker {model.id} stopped")
+
+
+def _assign_gpu(model_id: str, preferred: Optional[int] = None) -> int:
+    """Assign a GPU. If model already warm, return its GPU. Otherwise allocate or evict LRU."""
+    model = MODELS[model_id]
+
+    # Already running on a GPU
+    if model.gpu_id is not None and model.status == ModelStatus.WARM:
+        return model.gpu_id
+
+    # Preferred GPU free?
+    if preferred is not None and gpu_assignments.get(preferred) is None:
+        gpu_assignments[preferred] = model_id
+        return preferred
+
+    # Any free GPU?
+    for gid in range(GPU_COUNT):
+        if gpu_assignments[gid] is None:
+            gpu_assignments[gid] = model_id
+            return gid
+
+    # Evict LRU
+    lru_gid = min(
+        range(GPU_COUNT),
+        key=lambda g: MODELS[gpu_assignments[g]].last_used if gpu_assignments[g] else 0,
+    )
+    old_model_id = gpu_assignments[lru_gid]
+    if old_model_id:
+        old_model = MODELS[old_model_id]
+        logger.info(f"Evicting {old_model_id} from GPU {lru_gid}")
+        _kill_worker(old_model)
+        old_model.gpu_id = None
+    gpu_assignments[lru_gid] = model_id
+    return lru_gid
+
+
+def _ensure_worker(model_id: str) -> ModelInfo:
+    """Ensure the model's worker is running. Start it if needed."""
+    model = MODELS[model_id]
+
+    if model.status == ModelStatus.WARM and model.worker_proc and model.worker_proc.poll() is None:
+        model.last_used = time.time()
+        return model
+
+    # Need to start the worker
+    gpu_id = _assign_gpu(model_id)
+    ok = _start_worker(model, gpu_id)
+    if not ok:
+        raise RuntimeError(f"Failed to start worker for {model_id}: {model.error_msg}")
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
 @dataclass
 class Job:
     job_id: str
@@ -116,7 +264,68 @@ class Job:
 
 jobs: dict[str, Job] = {}
 
-app = FastAPI(title="Arc Fabric", version="0.1.0")
+
+def _run_generation(job: Job):
+    model = MODELS[job.model_id]
+    job.status = "running"
+    job.started_at = time.time()
+
+    job_dir = OUTPUTS / job.job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        worker = _ensure_worker(job.model_id)
+        url = f"http://127.0.0.1:{worker.worker_port}/generate"
+
+        payload = {
+            "prompt": job.prompt,
+            "num_frames": job.num_frames,
+            "seed": job.seed,
+            "output_dir": str(job_dir),
+        }
+        if job.model_id in ("ltx_2b", "ltx_13b"):
+            payload["height"] = job.height
+            payload["width"] = job.width
+
+        logger.info(f"Sending generate request to {url} for job {job.job_id}")
+        r = http_requests.post(url, json=payload, timeout=600)
+        result = r.json()
+
+        if result.get("status") == "success":
+            worker_output = result.get("output_path", "")
+
+            # Move/copy the output to our job dir if it's elsewhere
+            if worker_output and Path(worker_output).exists():
+                dest = job_dir / "output.mp4"
+                if Path(worker_output) != dest:
+                    shutil.copy2(worker_output, dest)
+                job.output_path = f"/outputs/{job.job_id}/output.mp4"
+            else:
+                # Search job_dir for any mp4
+                mp4s = sorted(job_dir.glob("**/*.mp4"), key=os.path.getmtime)
+                if mp4s:
+                    job.output_path = f"/outputs/{job.job_id}/{mp4s[-1].name}"
+
+            job.status = "completed"
+            job.completed_at = time.time()
+            job.progress = 1.0
+            worker.last_used = time.time()
+        else:
+            raise RuntimeError(result.get("error", "Unknown worker error"))
+
+    except Exception as e:
+        logger.exception(f"Job {job.job_id} failed")
+        job.status = "failed"
+        job.error = str(e)[:2000]
+        job.completed_at = time.time()
+        model.status = ModelStatus.ERROR
+        model.error_msg = str(e)[:500]
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(title="Arc Fabric", version="0.2.0")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUTS)), name="outputs")
 
 
@@ -129,268 +338,6 @@ class GenerateRequest(BaseModel):
     seed: int = 42
     gpu_id: Optional[int] = None
 
-
-def _assign_gpu(model_id: str, preferred: Optional[int] = None) -> int:
-    for gid, mid in gpu_assignments.items():
-        if mid == model_id:
-            return gid
-    if preferred is not None and gpu_assignments.get(preferred) is None:
-        gpu_assignments[preferred] = model_id
-        return preferred
-    for gid in range(GPU_COUNT):
-        if gpu_assignments[gid] is None:
-            gpu_assignments[gid] = model_id
-            return gid
-    lru_gid = min(
-        range(GPU_COUNT),
-        key=lambda g: MODELS[gpu_assignments[g]].last_used if gpu_assignments[g] else 0,
-    )
-    old_model = gpu_assignments[lru_gid]
-    if old_model:
-        logger.info(f"Evicting {old_model} from GPU {lru_gid}")
-        MODELS[old_model].status = ModelStatus.COLD
-        MODELS[old_model].gpu_id = None
-    gpu_assignments[lru_gid] = model_id
-    return lru_gid
-
-
-def _run_generation(job: Job):
-    model = MODELS[job.model_id]
-    job.status = "running"
-    job.started_at = time.time()
-    model.status = ModelStatus.WARMING
-    model.last_used = time.time()
-
-    gpu_id = _assign_gpu(job.model_id)
-    model.gpu_id = gpu_id
-
-    job_dir = OUTPUTS / job.job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    try:
-        if job.model_id == "wan21_1_3b":
-            _run_wan21(job, model, job_dir, env)
-        elif job.model_id == "longlive":
-            _run_longlive(job, model, job_dir, env)
-        elif job.model_id == "ltx_2b":
-            _run_ltx(job, model, job_dir, env)
-        else:
-            raise ValueError(f"Unknown model: {job.model_id}")
-
-        model.status = ModelStatus.WARM
-        job.status = "completed"
-        job.completed_at = time.time()
-        job.progress = 1.0
-
-    except Exception as e:
-        logger.exception(f"Job {job.job_id} failed")
-        job.status = "failed"
-        job.error = str(e)
-        job.completed_at = time.time()
-        model.status = ModelStatus.ERROR
-        model.error_msg = str(e)
-
-
-def _run_wan21(job: Job, model: ModelInfo, job_dir: Path, env: dict):
-    """Use the proven generate.py CLI that already works."""
-    python = str(Path(model.conda_env) / "bin" / "python")
-    script = str(ROOT / "models" / "wan21" / "generate.py")
-    output_file = str(job_dir / "output.mp4")
-
-    cmd = [
-        python, script,
-        "--task", "t2v-1.3B",
-        "--size", f"{job.height}*{job.width}",
-        "--ckpt_dir", str(ROOT / "weights" / "wan21" / "Wan2.1-T2V-1.3B"),
-        "--frame_num", str(job.num_frames),
-        "--sample_steps", str(model.default_steps),
-        "--base_seed", str(job.seed),
-        "--prompt", job.prompt,
-        "--save_file", output_file,
-    ]
-    _exec(cmd, env, job_dir, str(ROOT / "models" / "wan21"))
-    job.output_path = f"/outputs/{job.job_id}/output.mp4"
-
-
-def _run_longlive(job: Job, model: ModelInfo, job_dir: Path, env: dict):
-    """Run LongLive via inline script - matching the tested worker approach."""
-    python = str(Path(model.conda_env) / "bin" / "python")
-    working_dir = str(ROOT / "models" / "longlive")
-
-    prompt_escaped = job.prompt.replace("\\", "\\\\").replace("'", "\\'")
-    output_mp4 = str(job_dir / "output.mp4")
-
-    script = f"""
-import sys, os, torch
-sys.path.insert(0, '{working_dir}')
-os.chdir('{working_dir}')
-torch.set_grad_enabled(False)
-
-from omegaconf import OmegaConf
-from pipeline import CausalInferencePipeline
-from utils.misc import set_seed
-from torchvision.io import write_video
-from einops import rearrange
-
-set_seed({job.seed})
-device = torch.device('cuda')
-
-config = OmegaConf.load('configs/longlive_inference.yaml')
-config.distributed = False
-config.output_folder = '{job_dir}'
-config.num_output_frames = {job.num_frames}
-config.num_samples = 1
-
-pipeline = CausalInferencePipeline(config, device=device)
-
-state_dict = torch.load(config.generator_ckpt, map_location='cpu')
-key = 'generator_ema' if config.use_ema else 'generator'
-raw = state_dict.get(key, state_dict.get('model'))
-pipeline.generator.load_state_dict(raw)
-
-from utils.lora_utils import configure_lora_for_model
-import peft
-pipeline.generator.model = configure_lora_for_model(
-    pipeline.generator.model,
-    model_name='generator',
-    lora_config=config.adapter,
-    is_main_process=True,
-)
-lora_ckpt = torch.load(config.lora_ckpt, map_location='cpu')
-if isinstance(lora_ckpt, dict) and 'generator_lora' in lora_ckpt:
-    peft.set_peft_model_state_dict(pipeline.generator.model, lora_ckpt['generator_lora'])
-else:
-    peft.set_peft_model_state_dict(pipeline.generator.model, lora_ckpt)
-pipeline.is_lora_enabled = True
-
-pipeline = pipeline.to(dtype=torch.bfloat16)
-pipeline.generator.to(device=device)
-pipeline.vae.to(device=device)
-
-prompts = ['{prompt_escaped}']
-sampled_noise = torch.randn(
-    [1, {job.num_frames}, 16, 60, 104], device=device, dtype=torch.bfloat16
-)
-
-video, latents = pipeline.inference(
-    noise=sampled_noise,
-    text_prompts=prompts,
-    return_latents=True,
-    low_memory=False,
-    profile=False,
-)
-video_out = rearrange(video, 'b t c h w -> b t h w c').cpu()
-video_out = (255.0 * video_out[0]).clamp(0, 255).to(torch.uint8)
-write_video('{output_mp4}', video_out, fps={model.fps})
-pipeline.vae.model.clear_cache()
-print('ARCFABRIC_DONE')
-"""
-    script_path = job_dir / "run.py"
-    script_path.write_text(script)
-    cmd = [python, str(script_path)]
-    _exec(cmd, env, job_dir, working_dir)
-
-    if (job_dir / "output.mp4").exists():
-        job.output_path = f"/outputs/{job.job_id}/output.mp4"
-    else:
-        mp4s = sorted(job_dir.glob("**/*.mp4"), key=os.path.getmtime)
-        if mp4s:
-            job.output_path = f"/outputs/{job.job_id}/{mp4s[-1].name}"
-
-
-def _run_ltx(job: Job, model: ModelInfo, job_dir: Path, env: dict):
-    """Run LTX-Video with dynamic config."""
-    python = str(Path(model.conda_env) / "bin" / "python")
-    working_dir = str(ROOT / "models" / "ltx_video")
-    weights = ROOT / "weights" / "ltx_video" / "ltxv-2b-0.9.8-distilled"
-
-    pipe_cfg = {
-        "checkpoint_path": str(weights / "ltxv-2b-0.9.8-distilled.safetensors"),
-        "text_encoder_model_name_or_path": str(weights),
-        "precision": "bfloat16",
-        "sampler": "from_checkpoint",
-        "prompt_enhancement_words_threshold": 0,
-        "stochastic_sampling": False,
-        "decode_timestep": 0.05,
-        "decode_noise_scale": 0.025,
-        "stg_mode": "attention_values",
-        "prompt_enhancer_image_caption_model_name_or_path": "",
-        "prompt_enhancer_llm_model_name_or_path": "",
-    }
-
-    upscaler = weights / "ltxv-spatial-upscaler-0.9.8.safetensors"
-    if upscaler.exists():
-        pipe_cfg.update({
-            "pipeline_type": "multi-scale",
-            "downscale_factor": 0.6666666,
-            "spatial_upscaler_model_path": str(upscaler),
-            "first_pass": {"timesteps": [1.0, 0.9937, 0.9875, 0.9812, 0.975, 0.9094, 0.725],
-                           "guidance_scale": 1, "stg_scale": 0, "rescaling_scale": 1, "skip_block_list": [42]},
-            "second_pass": {"timesteps": [0.9094, 0.725, 0.4219],
-                            "guidance_scale": 1, "stg_scale": 0, "rescaling_scale": 1, "skip_block_list": [42]},
-        })
-    else:
-        pipe_cfg["pipeline_type"] = "single"
-        pipe_cfg["first_pass"] = {
-            "timesteps": [1.0, 0.9937, 0.9875, 0.9812, 0.975, 0.9094, 0.725, 0.4219],
-            "guidance_scale": 1, "stg_scale": 0, "rescaling_scale": 1, "skip_block_list": [42],
-        }
-
-    config_path = job_dir / "pipeline_config.yaml"
-    with open(config_path, "w") as f:
-        yaml.dump(pipe_cfg, f)
-
-    prompt_escaped = job.prompt.replace("\\", "\\\\").replace("'", "\\'")
-    output_mp4 = str(job_dir / "output.mp4")
-
-    script = f"""
-import sys, os
-sys.path.insert(0, '{working_dir}')
-os.chdir('{working_dir}')
-from ltx_video.inference import infer, InferenceConfig
-config = InferenceConfig(
-    pipeline_config='{config_path}',
-    prompt='{prompt_escaped}',
-    height={job.height}, width={job.width},
-    num_frames={job.num_frames}, seed={job.seed},
-    output_path='{output_mp4}',
-)
-infer(config=config)
-print('ARCFABRIC_DONE')
-"""
-    script_path = job_dir / "run.py"
-    script_path.write_text(script)
-    cmd = [python, str(script_path)]
-    _exec(cmd, env, job_dir, working_dir)
-
-    # LTX may write output with its own naming convention
-    if (job_dir / "output.mp4").exists():
-        job.output_path = f"/outputs/{job.job_id}/output.mp4"
-    else:
-        mp4s = sorted(job_dir.glob("**/*.mp4"), key=os.path.getmtime)
-        if mp4s:
-            rel = mp4s[-1].relative_to(job_dir)
-            job.output_path = f"/outputs/{job.job_id}/{rel}"
-
-
-def _exec(cmd: list[str], env: dict, job_dir: Path, cwd: str):
-    log_path = job_dir / "log.txt"
-    logger.info(f"Executing: {' '.join(cmd[:4])}...")
-    with open(log_path, "w") as log_file:
-        proc = subprocess.Popen(
-            cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT,
-            cwd=cwd,
-        )
-        proc.wait()
-    if proc.returncode != 0:
-        log_text = log_path.read_text()[-3000:]
-        raise RuntimeError(f"Process exited {proc.returncode}:\n{log_text}")
-
-
-# ──────────────────────── API routes ────────────────────────
 
 @app.get("/api/models")
 async def api_models():
@@ -483,10 +430,22 @@ async def api_jobs():
 @app.get("/api/logs/{job_id}")
 async def api_logs(job_id: str):
     log_path = OUTPUTS / job_id / "log.txt"
-    if not log_path.exists():
-        raise HTTPException(404, "Log not found")
-    text = log_path.read_text()
-    return {"log": text[-5000:]}
+    if log_path.exists():
+        return {"log": log_path.read_text()[-5000:]}
+    # Fall back to worker log
+    job = jobs.get(job_id)
+    if job:
+        worker_log = OUTPUTS / "_workers" / f"{job.model_id}.log"
+        if worker_log.exists():
+            return {"log": worker_log.read_text()[-5000:]}
+    raise HTTPException(404, "Log not found")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    for model in MODELS.values():
+        if model.worker_proc:
+            _kill_worker(model)
 
 
 @app.get("/")

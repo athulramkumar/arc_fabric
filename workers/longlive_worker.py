@@ -1,4 +1,4 @@
-"""LongLive model worker - thin FastAPI server wrapping the LongLive inference pipeline."""
+"""LongLive model worker - persistent FastAPI server wrapping the LongLive inference pipeline."""
 
 import argparse
 import os
@@ -6,17 +6,16 @@ import sys
 import time
 import logging
 from pathlib import Path
+from typing import Optional
 
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel as PydanticModel
-from typing import Optional
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Paths
 WORKER_DIR = Path(__file__).parent
 PROJECT_ROOT = WORKER_DIR.parent
 MODELS_DIR = PROJECT_ROOT / "models" / "longlive"
@@ -25,8 +24,6 @@ WEIGHTS_DIR = PROJECT_ROOT / "weights" / "longlive"
 app = FastAPI(title="LongLive Worker")
 
 pipeline = None
-text_encoder = None
-vae = None
 device = None
 
 
@@ -61,7 +58,7 @@ def setup_symlinks():
 
 
 def load_model():
-    """Load the LongLive pipeline."""
+    """Load the LongLive pipeline with LoRA."""
     global pipeline, device
 
     device = torch.device("cuda")
@@ -94,25 +91,29 @@ def load_model():
             raise ValueError("Generator state dict not found")
         pipeline.generator.load_state_dict(raw)
 
-    # Load LoRA if configured
+    # Load LoRA
     if getattr(config, "adapter", None):
         from utils.lora_utils import configure_lora_for_model
         import peft
-        pipeline.is_lora_enabled = False
-        if configure_lora_for_model is not None:
-            pipeline.generator.model = configure_lora_for_model(
-                pipeline.generator.model,
-                model_name="generator",
-                lora_config=config.adapter,
-                is_main_process=True,
-            )
-            if config.lora_ckpt:
-                lora_state = torch.load(config.lora_ckpt, map_location="cpu")
-                peft.set_peft_model_state_dict(pipeline.generator.model, lora_state)
-            pipeline.is_lora_enabled = True
-            logger.info("LoRA adapter loaded")
 
-    pipeline.generator = pipeline.generator.to(device).to(torch.bfloat16)
+        pipeline.generator.model = configure_lora_for_model(
+            pipeline.generator.model,
+            model_name="generator",
+            lora_config=config.adapter,
+            is_main_process=True,
+        )
+        if config.lora_ckpt:
+            lora_ckpt = torch.load(config.lora_ckpt, map_location="cpu")
+            if isinstance(lora_ckpt, dict) and "generator_lora" in lora_ckpt:
+                peft.set_peft_model_state_dict(pipeline.generator.model, lora_ckpt["generator_lora"])
+            else:
+                peft.set_peft_model_state_dict(pipeline.generator.model, lora_ckpt)
+        pipeline.is_lora_enabled = True
+        logger.info("LoRA adapter loaded")
+
+    pipeline = pipeline.to(dtype=torch.bfloat16)
+    pipeline.generator.to(device=device)
+    pipeline.vae.to(device=device)
     logger.info("LongLive pipeline loaded successfully")
 
 
@@ -132,8 +133,6 @@ async def generate(req: GenerateRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
-        from omegaconf import OmegaConf
-        from utils.dataset import TextDataset
         from utils.misc import set_seed
         from torchvision.io import write_video
         from einops import rearrange
@@ -142,36 +141,31 @@ async def generate(req: GenerateRequest):
 
         output_dir = Path(req.output_dir or str(PROJECT_ROOT / "outputs" / "longlive"))
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        config = OmegaConf.load(str(MODELS_DIR / "configs" / "longlive_inference.yaml"))
+        output_path = str(output_dir / "output.mp4")
 
         start = time.time()
 
         prompts = [req.prompt]
-        context = pipeline.text_encoder(prompts)
-        prompt_embeds = context["prompt_embeds"]
-
-        negative = pipeline.text_encoder([""])
-        negative_embeds = negative["prompt_embeds"]
-
-        video = pipeline.generate(
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_embeds,
-            num_frames=req.num_frames,
-            seed=req.seed,
+        sampled_noise = torch.randn(
+            [1, req.num_frames, 16, 60, 104], device=device, dtype=torch.bfloat16,
         )
 
+        video, latents = pipeline.inference(
+            noise=sampled_noise,
+            text_prompts=prompts,
+            return_latents=True,
+            low_memory=False,
+            profile=False,
+        )
+
+        video_out = rearrange(video, "b t c h w -> b t h w c").cpu()
+        video_out = (255.0 * video_out[0]).clamp(0, 255).to(torch.uint8)
+        write_video(output_path, video_out, fps=16)
+
+        pipeline.vae.model.clear_cache()
+
         gen_time = time.time() - start
-
-        # Decode and save
-        output_path = str(output_dir / f"longlive_{req.session_id or 'test'}_{int(time.time())}.mp4")
-
-        if isinstance(video, torch.Tensor):
-            video_np = video.cpu()
-            if video_np.dim() == 4:
-                video_np = rearrange(video_np, "c t h w -> t h w c")
-            video_np = ((video_np + 1) / 2 * 255).clamp(0, 255).to(torch.uint8)
-            write_video(output_path, video_np, fps=16)
+        logger.info(f"Generated {req.num_frames} frames in {gen_time:.1f}s")
 
         return GenerateResponse(
             status="success",
@@ -188,11 +182,7 @@ async def generate(req: GenerateRequest):
 @app.get("/status")
 async def status():
     mem = torch.cuda.memory_allocated(0) / 1e9 if torch.cuda.is_available() else 0
-    return {
-        "model": "longlive",
-        "loaded": pipeline is not None,
-        "gpu_memory_gb": mem,
-    }
+    return {"model": "longlive", "loaded": pipeline is not None, "gpu_memory_gb": mem}
 
 
 if __name__ == "__main__":
