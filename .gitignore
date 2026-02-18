@@ -18,6 +18,7 @@ outputs/
 
 # Conda envs (portable, but too large for git)
 envs/
+!envs/*.txt
 
 # IDE
 .vscode/
