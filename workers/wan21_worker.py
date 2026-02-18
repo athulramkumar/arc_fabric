@@ -34,6 +34,8 @@ class GenerateRequest(PydanticModel):
     height: int = 480
     width: int = 832
     seed: int = 42
+    sampling_steps: Optional[int] = None
+    guidance_scale: float = 5.0
     session_id: Optional[str] = None
     output_dir: Optional[str] = None
 
@@ -100,14 +102,17 @@ async def generate(req: GenerateRequest):
 
         from wan.utils.utils import cache_video
 
+        default_steps = 50 if "14B" in _model_variant else 30
+        steps = req.sampling_steps or default_steps
+
         video = wan_pipe.generate(
             req.prompt,
             size=(req.width, req.height),
             frame_num=req.num_frames,
             shift=5.0,
             sample_solver="unipc",
-            sampling_steps=30,
-            guide_scale=5.0,
+            sampling_steps=steps,
+            guide_scale=req.guidance_scale,
             seed=req.seed,
             offload_model=False,
         )

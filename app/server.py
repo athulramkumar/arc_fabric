@@ -64,6 +64,7 @@ class ModelInfo:
 
 
 MODELS: dict[str, ModelInfo] = {
+    # ── Wan 2.1 family ──
     "wan21_1_3b": ModelInfo(
         id="wan21_1_3b",
         display_name="Wan 2.1 — 1.3B",
@@ -74,6 +75,27 @@ MODELS: dict[str, ModelInfo] = {
         default_frames=33, default_steps=30, fps=16,
         worker_script=str(ROOT / "workers" / "wan21_worker.py"),
     ),
+    "wan21_14b": ModelInfo(
+        id="wan21_14b",
+        display_name="Wan 2.1 — 14B",
+        description="High-quality 14B text-to-video model. Slower but significantly better detail and coherence.",
+        conda_env=str(ROOT / "envs" / "af-wan21"),
+        gpu_memory_gb=40.0,
+        default_height=480, default_width=832,
+        default_frames=81, default_steps=50, fps=16,
+        worker_script=str(ROOT / "workers" / "wan21_worker.py"),
+    ),
+    "hybrid_wan21": ModelInfo(
+        id="hybrid_wan21",
+        display_name="Wan 2.1 — Hybrid (14B+1.3B)",
+        description="Hybrid schedule: 14B for structure (30%), 1.3B for refinement (70%). Best quality-speed tradeoff.",
+        conda_env=str(ROOT / "envs" / "af-wan21"),
+        gpu_memory_gb=50.0,
+        default_height=480, default_width=832,
+        default_frames=81, default_steps=50, fps=16,
+        worker_script=str(ROOT / "workers" / "hybrid_wan_worker.py"),
+    ),
+    # ── LongLive family ──
     "longlive": ModelInfo(
         id="longlive",
         display_name="LongLive — 1.3B",
@@ -84,6 +106,17 @@ MODELS: dict[str, ModelInfo] = {
         default_frames=30, default_steps=4, fps=16,
         worker_script=str(ROOT / "workers" / "longlive_worker.py"),
     ),
+    "longlive_interactive": ModelInfo(
+        id="longlive_interactive",
+        display_name="LongLive — Interactive",
+        description="Interactive chunk-by-chunk generation. Change prompts mid-video with KV cache continuity.",
+        conda_env=str(ROOT / "envs" / "af-longlive"),
+        gpu_memory_gb=25.0,
+        default_height=480, default_width=832,
+        default_frames=160, default_steps=4, fps=16,
+        worker_script=str(ROOT / "workers" / "longlive_interactive_worker.py"),
+    ),
+    # ── LTX-Video family ──
     "ltx_2b": ModelInfo(
         id="ltx_2b",
         display_name="LTX-Video — 2B Distilled",
@@ -92,6 +125,36 @@ MODELS: dict[str, ModelInfo] = {
         gpu_memory_gb=26.0,
         default_height=480, default_width=704,
         default_frames=97, default_steps=8, fps=24,
+        worker_script=str(ROOT / "workers" / "ltx_worker.py"),
+    ),
+    "ltx_2b_dev": ModelInfo(
+        id="ltx_2b_dev",
+        display_name="LTX-Video — 2B (Full)",
+        description="Full 2B model with CFG guidance. Higher quality, 40 steps. Single-pass pipeline.",
+        conda_env=str(ROOT / "envs" / "af-ltx"),
+        gpu_memory_gb=26.0,
+        default_height=480, default_width=704,
+        default_frames=97, default_steps=40, fps=24,
+        worker_script=str(ROOT / "workers" / "ltx_worker.py"),
+    ),
+    "ltx_13b": ModelInfo(
+        id="ltx_13b",
+        display_name="LTX-Video — 13B Distilled",
+        description="Large 13B DiT model, distilled for fewer steps. Best quality from LTX family.",
+        conda_env=str(ROOT / "envs" / "af-ltx"),
+        gpu_memory_gb=50.0,
+        default_height=480, default_width=704,
+        default_frames=97, default_steps=8, fps=24,
+        worker_script=str(ROOT / "workers" / "ltx_worker.py"),
+    ),
+    "ltx_13b_dev": ModelInfo(
+        id="ltx_13b_dev",
+        display_name="LTX-Video — 13B (Full)",
+        description="Full 13B model with complex guidance schedule. Highest quality, 30+ steps per pass.",
+        conda_env=str(ROOT / "envs" / "af-ltx"),
+        gpu_memory_gb=55.0,
+        default_height=480, default_width=704,
+        default_frames=97, default_steps=30, fps=24,
         worker_script=str(ROOT / "workers" / "ltx_worker.py"),
     ),
 }

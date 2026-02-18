@@ -52,8 +52,34 @@ class GenerateResponse(PydanticModel):
     error: Optional[str] = None
 
 
+def _resolve_config_yaml(variant: str) -> str:
+    """Map model variant to its official config YAML in the repo."""
+    CONFIG_MAP = {
+        "ltx_2b": "ltxv-2b-0.9.8-distilled.yaml",
+        "ltx_video": "ltxv-2b-0.9.8-distilled.yaml",
+        "ltx_2b_dev": "ltxv-2b-0.9.6-dev.yaml",
+        "ltx_13b": "ltxv-13b-0.9.8-distilled.yaml",
+        "ltx_13b_dev": "ltxv-13b-0.9.8-dev.yaml",
+    }
+    return str(MODELS_DIR / "configs" / CONFIG_MAP.get(variant, CONFIG_MAP["ltx_2b"]))
+
+
+def _resolve_weights(variant: str) -> tuple[str, Path]:
+    """Map model variant to checkpoint path and weights directory."""
+    VARIANT_MAP = {
+        "ltx_2b": ("ltxv-2b-0.9.8-distilled", "ltxv-2b-0.9.8-distilled.safetensors"),
+        "ltx_video": ("ltxv-2b-0.9.8-distilled", "ltxv-2b-0.9.8-distilled.safetensors"),
+        "ltx_2b_dev": ("ltxv-2b-0.9.6-dev", "ltxv-2b-0.9.6-dev-04-25.safetensors"),
+        "ltx_13b": ("ltxv-13b-0.9.8-distilled", "ltxv-13b-0.9.8-distilled.safetensors"),
+        "ltx_13b_dev": ("ltxv-13b-0.9.8-dev", "ltxv-13b-0.9.8-dev.safetensors"),
+    }
+    subdir, ckpt_file = VARIANT_MAP.get(variant, VARIANT_MAP["ltx_2b"])
+    weights_path = WEIGHTS_DIR / subdir
+    return str(weights_path / ckpt_file), weights_path
+
+
 def load_model(variant: str):
-    """Load the LTX pipeline ONCE at startup."""
+    """Load the LTX pipeline ONCE at startup using official config YAMLs."""
     global _pipeline, _pipeline_config, _skip_layer_strategy, _model_variant, _precision
 
     _model_variant = variant
@@ -65,59 +91,32 @@ def load_model(variant: str):
         seed_everething,
         get_device,
     )
-    from ltx_video.pipelines.pipeline_ltx_video import LTXVideoPipeline
     from ltx_video.utils.skip_layer_strategy import SkipLayerStrategy
 
-    if variant in ("ltx_2b", "ltx_video"):
-        weights_subdir = "ltxv-2b-0.9.8-distilled"
-        checkpoint_file = "ltxv-2b-0.9.8-distilled.safetensors"
-    else:
-        weights_subdir = "ltxv-13b-0.9.8-distilled"
-        checkpoint_file = "ltxv-13b-0.9.8-distilled.safetensors"
+    ckpt_path, weights_path = _resolve_weights(variant)
+    config_yaml = _resolve_config_yaml(variant)
 
-    weights_path = WEIGHTS_DIR / weights_subdir
-    ckpt_path = str(weights_path / checkpoint_file)
+    logger.info(f"Loading LTX-Video ({variant})")
+    logger.info(f"  Config: {config_yaml}")
+    logger.info(f"  Checkpoint: {ckpt_path}")
 
-    pipe_config = {
-        "checkpoint_path": ckpt_path,
-        "text_encoder_model_name_or_path": str(weights_path),
-        "precision": "bfloat16",
-        "sampler": "from_checkpoint",
-        "prompt_enhancement_words_threshold": 0,
-        "prompt_enhancer_image_caption_model_name_or_path": "",
-        "prompt_enhancer_llm_model_name_or_path": "",
-        "stochastic_sampling": False,
-        "decode_timestep": 0.05,
-        "decode_noise_scale": 0.025,
-        "stg_mode": "attention_values",
-    }
+    pipe_config = load_pipeline_config(config_yaml)
+
+    # Override paths to point to our local weights
+    pipe_config["checkpoint_path"] = ckpt_path
+    pipe_config["text_encoder_model_name_or_path"] = str(weights_path)
+    pipe_config["prompt_enhancement_words_threshold"] = 0
+    pipe_config["prompt_enhancer_image_caption_model_name_or_path"] = ""
+    pipe_config["prompt_enhancer_llm_model_name_or_path"] = ""
 
     upscaler = weights_path / "ltxv-spatial-upscaler-0.9.8.safetensors"
-    if upscaler.exists():
-        pipe_config.update({
-            "pipeline_type": "multi-scale",
-            "downscale_factor": 0.6666666,
-            "spatial_upscaler_model_path": str(upscaler),
-            "first_pass": {
-                "timesteps": [1.0, 0.9937, 0.9875, 0.9812, 0.975, 0.9094, 0.725],
-                "guidance_scale": 1, "stg_scale": 0, "rescaling_scale": 1, "skip_block_list": [42],
-            },
-            "second_pass": {
-                "timesteps": [0.9094, 0.725, 0.4219],
-                "guidance_scale": 1, "stg_scale": 0, "rescaling_scale": 1, "skip_block_list": [42],
-            },
-        })
-    else:
-        pipe_config["pipeline_type"] = "single"
-        pipe_config["first_pass"] = {
-            "timesteps": [1.0, 0.9937, 0.9875, 0.9812, 0.975, 0.9094, 0.725, 0.4219],
-            "guidance_scale": 1, "stg_scale": 0, "rescaling_scale": 1, "skip_block_list": [42],
-        }
+    if "spatial_upscaler_model_path" in pipe_config and upscaler.exists():
+        pipe_config["spatial_upscaler_model_path"] = str(upscaler)
 
-    _precision = pipe_config["precision"]
+    _precision = pipe_config.get("precision", "bfloat16")
     device = get_device()
 
-    logger.info(f"Loading LTX-Video ({variant}) on {torch.cuda.get_device_name(0)}")
+    logger.info(f"  GPU: {torch.cuda.get_device_name(0)}")
 
     pipeline = create_ltx_video_pipeline(
         ckpt_path=ckpt_path,
@@ -130,7 +129,7 @@ def load_model(variant: str):
         prompt_enhancer_llm_model_name_or_path="",
     )
 
-    if pipe_config.get("pipeline_type") == "multi-scale":
+    if pipe_config.get("pipeline_type") == "multi-scale" and upscaler.exists():
         from ltx_video.inference import create_latent_upsampler
         from ltx_video.pipelines.pipeline_ltx_video import LTXMultiScalePipeline
         latent_upsampler = create_latent_upsampler(str(upscaler), pipeline.device)
@@ -144,7 +143,7 @@ def load_model(variant: str):
     else:
         _skip_layer_strategy = SkipLayerStrategy.AttentionValues
 
-    # Remove keys that are not pipeline __call__ args
+    # Remove keys that aren't pipeline __call__ args
     for key in ("checkpoint_path", "text_encoder_model_name_or_path", "precision",
                 "sampler", "prompt_enhancement_words_threshold",
                 "pipeline_type", "spatial_upscaler_model_path",

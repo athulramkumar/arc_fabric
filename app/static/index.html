@@ -38,14 +38,17 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 .section-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--text3);margin-bottom:10px}
 
 /* Models */
-.model-list{display:flex;flex-direction:column;gap:6px}
-.model-card{display:flex;align-items:start;gap:10px;padding:10px 12px;border-radius:var(--radius);border:1.5px solid transparent;background:var(--surface2);cursor:pointer;transition:all .12s}
+.model-list{display:flex;flex-direction:column;gap:4px}
+.model-family{margin-bottom:4px}
+.model-family-header{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);padding:6px 4px 2px;display:flex;align-items:center;gap:6px}
+.model-family-header .count{font-size:8px;background:var(--surface3);padding:1px 5px;border-radius:6px}
+.model-card{display:flex;align-items:start;gap:10px;padding:8px 10px;border-radius:var(--radius);border:1.5px solid transparent;background:var(--surface2);cursor:pointer;transition:all .12s}
 .model-card:hover{border-color:var(--border2);background:var(--surface3)}
 .model-card.selected{border-color:var(--accent);background:var(--accent-bg)}
 .model-card .info{flex:1;min-width:0}
-.model-card .name{font-size:13px;font-weight:600;line-height:1.3}
-.model-card .desc{font-size:11px;color:var(--text3);line-height:1.4;margin-top:2px}
-.badge{font-size:9px;font-weight:700;padding:2px 7px;border-radius:8px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.model-card .name{font-size:12px;font-weight:600;line-height:1.3}
+.model-card .desc{font-size:10px;color:var(--text3);line-height:1.3;margin-top:1px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.badge{font-size:8px;font-weight:700;padding:2px 6px;border-radius:8px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;flex-shrink:0;margin-top:2px}
 .badge.cold{background:var(--surface3);color:var(--text3)}
 .badge.warm{background:var(--green-bg);color:var(--green)}
 .badge.warming{background:var(--orange-bg);color:var(--orange)}
@@ -169,16 +172,34 @@ async function fetchJSON(url, opts) {
   return r.json();
 }
 
+function getFamily(id) {
+  if (id.startsWith('wan21') || id.startsWith('hybrid_wan')) return 'Wan 2.1';
+  if (id.startsWith('longlive')) return 'LongLive';
+  if (id.startsWith('ltx')) return 'LTX-Video';
+  return 'Other';
+}
+
 async function loadModels() {
   modelsData = await fetchJSON('/api/models');
   const list = $('#modelList');
-  list.innerHTML = modelsData.map(m => `
-    <div class="model-card${selectedModel===m.id?' selected':''}" data-id="${m.id}" onclick="selectModel('${m.id}')">
-      <div class="info">
-        <div class="name">${m.display_name}</div>
-        <div class="desc">${m.description}</div>
-      </div>
-      <div class="badge ${m.status}">${m.status}${m.gpu_id!==null?' (GPU '+m.gpu_id+')':''}</div>
+  const families = {};
+  modelsData.forEach(m => {
+    const f = getFamily(m.id);
+    if (!families[f]) families[f] = [];
+    families[f].push(m);
+  });
+  list.innerHTML = Object.entries(families).map(([family, models]) => `
+    <div class="model-family">
+      <div class="model-family-header">${family}<span class="count">${models.length}</span></div>
+      ${models.map(m => `
+        <div class="model-card${selectedModel===m.id?' selected':''}" data-id="${m.id}" onclick="selectModel('${m.id}')">
+          <div class="info">
+            <div class="name">${m.display_name}</div>
+            <div class="desc">${m.description}</div>
+          </div>
+          <div class="badge ${m.status}">${m.status}${m.gpu_id!==null?' (GPU '+m.gpu_id+')':''}</div>
+        </div>
+      `).join('')}
     </div>
   `).join('');
   if (!selectedModel && modelsData.length) selectModel(modelsData[0].id);
