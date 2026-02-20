@@ -745,6 +745,187 @@ async def api_logs(job_id: str):
     raise HTTPException(404, "Log not found")
 
 
+# ---------------------------------------------------------------------------
+# Interactive chunk-by-chunk video generation (proxied to longlive_interactive)
+# ---------------------------------------------------------------------------
+
+class InteractiveSetupRequest(BaseModel):
+    seed: int = 42
+    chunk_duration: float = 10.0
+    max_chunks: int = 12
+
+
+class InteractiveGroundingRequest(BaseModel):
+    grounding: str
+    skip_ai: bool = True
+
+
+class InteractiveChunkRequest(BaseModel):
+    user_prompt: str
+    processed_prompt: Optional[str] = None
+    skip_ai: bool = True
+
+
+_interactive_session: dict = {"session_id": None, "session_dir": None}
+
+
+def _interactive_worker_url() -> str:
+    model = MODELS["longlive_interactive"]
+    if not _is_worker_alive(model):
+        raise HTTPException(503, "Interactive worker not available. Call setup first.")
+    return f"http://127.0.0.1:{model.worker_port}"
+
+
+def _path_to_url(abs_path: str) -> Optional[str]:
+    """Convert an absolute file path under OUTPUTS to a /outputs/... URL."""
+    if not abs_path:
+        return None
+    try:
+        return "/outputs/" + str(Path(abs_path).relative_to(OUTPUTS))
+    except ValueError:
+        return None
+
+
+@app.post("/api/interactive/setup")
+async def api_interactive_setup(req: InteractiveSetupRequest = InteractiveSetupRequest()):
+    worker = _ensure_worker("longlive_interactive")
+    output_dir = str(OUTPUTS / "interactive")
+    try:
+        r = http_requests.post(
+            f"http://127.0.0.1:{worker.worker_port}/setup",
+            json={
+                "output_dir": output_dir,
+                "seed": req.seed,
+                "chunk_duration": req.chunk_duration,
+                "max_chunks": req.max_chunks,
+            },
+            timeout=300,
+        )
+        r.raise_for_status()
+    except http_requests.exceptions.HTTPError:
+        raise HTTPException(502, f"Worker setup failed: {r.text[:500]}")
+    except Exception as e:
+        raise HTTPException(502, f"Worker setup failed: {e}")
+    result = r.json()
+    _interactive_session["session_id"] = result.get("session_id")
+    _interactive_session["session_dir"] = result.get("session_dir")
+    worker.last_used = time.time()
+    return result
+
+
+@app.post("/api/interactive/grounding")
+async def api_interactive_grounding(req: InteractiveGroundingRequest):
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/grounding", json=req.dict(), timeout=60)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Grounding failed: {e}")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return r.json()
+
+
+@app.post("/api/interactive/generate_chunk")
+async def api_interactive_generate_chunk(req: InteractiveChunkRequest):
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/generate_chunk", json=req.dict(), timeout=600)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Chunk generation failed: {e}")
+    result = r.json()
+    for key in ("chunk_video", "running_video"):
+        if key in result:
+            result[f"{key}_url"] = _path_to_url(result[key])
+    MODELS["longlive_interactive"].last_used = time.time()
+    return result
+
+
+@app.post("/api/interactive/go_back")
+async def api_interactive_go_back():
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/go_back", timeout=30)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Go-back failed: {e}")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return r.json()
+
+
+@app.post("/api/interactive/finalize")
+async def api_interactive_finalize():
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/finalize", timeout=120)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Finalize failed: {e}")
+    result = r.json()
+    if "final_video" in result:
+        result["final_video_url"] = _path_to_url(result["final_video"])
+    MODELS["longlive_interactive"].last_used = time.time()
+    return result
+
+
+@app.post("/api/interactive/reset")
+async def api_interactive_reset():
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/reset", timeout=30)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Reset failed: {e}")
+    result = r.json()
+    _interactive_session["session_id"] = result.get("new_session_id")
+    _interactive_session["session_dir"] = result.get("session_dir")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return result
+
+
+@app.get("/api/interactive/status")
+async def api_interactive_status():
+    try:
+        url = _interactive_worker_url()
+    except HTTPException:
+        return {"is_setup": False, "model_loaded": False}
+    try:
+        r = http_requests.get(f"{url}/status", timeout=10)
+        if r.status_code == 200:
+            result = r.json()
+            sd = result.get("session_dir")
+            cc = result.get("current_chunk", 0)
+            if sd and cc > 0:
+                result["last_chunk_url"] = _path_to_url(
+                    str(Path(sd) / f"chunk_{cc}.mp4")
+                )
+                result["running_video_url"] = _path_to_url(
+                    str(Path(sd) / f"running_{cc}.mp4")
+                )
+            return result
+    except Exception:
+        pass
+    return {"is_setup": False, "model_loaded": False}
+
+
+@app.get("/api/interactive/logs")
+async def api_interactive_logs():
+    log_path = OUTPUTS / "_workers" / "longlive_interactive.log"
+    if log_path.exists():
+        return {"log": log_path.read_text()[-5000:]}
+    return {"log": ""}
+
+
 @app.on_event("shutdown")
 async def shutdown():
     for model in MODELS.values():

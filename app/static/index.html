@@ -127,7 +127,28 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 
 .empty{color:var(--text3);font-size:12px}
 
-@media(max-width:600px){.main{flex-direction:column}.sidebar{max-width:none;min-width:0;border-right:none;border-bottom:1px solid var(--border)}}
+/* Interactive builder */
+.ix-status{font-size:12px;color:var(--text2);line-height:1.5;margin-bottom:8px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;white-space:pre-line;max-height:120px;overflow-y:auto}
+.ix-chunk-info{font-size:13px;font-weight:600;color:var(--accent2);margin-bottom:8px}
+.ix-video-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-bottom:6px}
+.ix-video-small{aspect-ratio:16/9}
+.ix-video-small video{width:100%;height:100%;object-fit:contain;display:block}
+.ix-video-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.ix-nav-row{display:flex;gap:6px;margin-top:8px}
+.ix-nav-btn{flex:1;padding:8px;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;color:#fff;transition:opacity .12s}
+.ix-nav-btn:hover{opacity:.85}
+.ix-nav-btn:disabled{opacity:.4;cursor:not-allowed}
+.ix-nav-btn.back{background:var(--surface3);color:var(--text2)}
+.ix-nav-btn.reset{background:var(--surface3);color:var(--text2)}
+.ix-nav-btn.finalize{background:var(--green)}
+.ix-history{display:flex;flex-direction:column;gap:4px}
+.ix-history-row{display:flex;gap:10px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text2)}
+.ix-history-row .num{font-weight:700;color:var(--accent2);min-width:20px}
+.ix-history-row .time{color:var(--text3);min-width:55px}
+.ix-history-row .prompt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ix-step-badge{display:inline-block;font-size:9px;font-weight:700;padding:2px 6px;border-radius:6px;background:var(--accent-bg);color:var(--accent2);margin-bottom:6px}
+
+@media(max-width:600px){.main{flex-direction:column}.sidebar{max-width:none;min-width:0;border-right:none;border-bottom:1px solid var(--border)}.ix-video-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -142,37 +163,80 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
         <div class="section-title">Model</div>
         <div class="model-list" id="modelList"></div>
       </div>
-      <div class="section">
-        <div class="section-title">Parameters</div>
-        <div class="param-grid">
-          <div class="param-group full">
-            <label>Prompt</label>
-            <textarea id="prompt">A golden retriever running joyfully on a sunny beach, waves crashing in the background, cinematic lighting</textarea>
+      <div id="standardSidebar">
+        <div class="section">
+          <div class="section-title">Parameters</div>
+          <div class="param-grid">
+            <div class="param-group full">
+              <label>Prompt</label>
+              <textarea id="prompt">A golden retriever running joyfully on a sunny beach, waves crashing in the background, cinematic lighting</textarea>
+            </div>
+            <div class="param-group"><label>Width</label><input type="number" id="width" value="832"></div>
+            <div class="param-group"><label>Height</label><input type="number" id="height" value="480"></div>
+            <div class="param-group"><label>Frames</label><input type="number" id="numFrames" value="33"></div>
+            <div class="param-group"><label>Seed</label><input type="number" id="seed" value="42"></div>
           </div>
-          <div class="param-group"><label>Width</label><input type="number" id="width" value="832"></div>
-          <div class="param-group"><label>Height</label><input type="number" id="height" value="480"></div>
-          <div class="param-group"><label>Frames</label><input type="number" id="numFrames" value="33"></div>
-          <div class="param-group"><label>Seed</label><input type="number" id="seed" value="42"></div>
+          <div class="cache-section" id="cacheSection">
+            <label class="cache-toggle">
+              <input type="checkbox" id="enableCaching" onchange="toggleCacheParams()">
+              Enable step caching (skip redundant steps)
+            </label>
+            <div class="cache-params" id="cacheParams">
+              <div class="param-group"><label>Start step</label><input type="number" id="cacheStart" value="2"></div>
+              <div class="param-group"><label>End step</label><input type="number" id="cacheEnd" value="8"></div>
+              <div class="param-group"><label>Interval</label><input type="number" id="cacheInterval" value="3"></div>
+            </div>
+          </div>
         </div>
-        <div class="cache-section" id="cacheSection">
-          <label class="cache-toggle">
-            <input type="checkbox" id="enableCaching" onchange="toggleCacheParams()">
-            Enable step caching (skip redundant steps)
-          </label>
-          <div class="cache-params" id="cacheParams">
-            <div class="param-group"><label>Start step</label><input type="number" id="cacheStart" value="2"></div>
-            <div class="param-group"><label>End step</label><input type="number" id="cacheEnd" value="8"></div>
-            <div class="param-group"><label>Interval</label><input type="number" id="cacheInterval" value="3"></div>
-          </div>
+        <div class="section">
+          <button class="gen-btn" id="genBtn" onclick="generate()">Generate Video</button>
+          <div class="active-jobs" id="activeJobs"></div>
         </div>
       </div>
-      <div class="section">
-        <button class="gen-btn" id="genBtn" onclick="generate()">Generate Video</button>
-        <div class="active-jobs" id="activeJobs"></div>
+      <div id="interactiveSidebar" style="display:none">
+        <div class="section">
+          <div class="section-title">Interactive Video Builder</div>
+          <div id="ixStatus" class="ix-status">Click Setup Model to begin</div>
+          <button class="gen-btn" id="ixSetupBtn" onclick="ixSetup()">Setup Model</button>
+          <div class="param-grid" style="margin-top:8px">
+            <div class="param-group"><label>Seed</label><input type="number" id="ixSeed" value="42"></div>
+            <div class="param-group"><label>Max Chunks</label><input type="number" id="ixMaxChunks" value="12"></div>
+          </div>
+        </div>
+        <div class="section" id="ixGroundingSection" style="display:none">
+          <div class="ix-step-badge">Step 1</div>
+          <div class="section-title">Set the Scene</div>
+          <div class="param-group full">
+            <label>Scene Description (grounding)</label>
+            <textarea id="ixGrounding" placeholder="e.g., A young woman with red hair standing in a misty forest at dawn" style="min-height:56px"></textarea>
+          </div>
+          <button class="gen-btn" onclick="ixSetGrounding()" style="margin-top:6px">Set Scene</button>
+        </div>
+        <div class="section" id="ixChunkSection" style="display:none">
+          <div class="ix-step-badge">Step 2</div>
+          <div class="section-title">Build Chunks</div>
+          <div id="ixChunkInfo" class="ix-chunk-info">Chunk 1 (0-10s)</div>
+          <div class="param-group full">
+            <label>What happens in this chunk?</label>
+            <textarea id="ixChunkPrompt" placeholder="e.g., she slowly turns to face the camera, wind blowing through her hair" style="min-height:56px"></textarea>
+          </div>
+          <button class="gen-btn" id="ixGenBtn" onclick="ixGenerateChunk()">Generate Chunk</button>
+          <div class="ix-nav-row">
+            <button class="ix-nav-btn back" onclick="ixGoBack()" id="ixBackBtn" disabled>Back</button>
+            <button class="ix-nav-btn reset" onclick="ixReset()">Reset</button>
+            <button class="ix-nav-btn finalize" onclick="ixFinalize()" id="ixFinalizeBtn" disabled>Finalize</button>
+          </div>
+        </div>
+        <div class="section" id="ixLogSection" style="display:none">
+          <div class="section-title">Worker Log</div>
+          <div class="log-box" style="max-height:120px">
+            <div class="log-content" id="ixLogContent" style="font-size:10px"></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="output">
-      <div class="output-inner">
+      <div class="output-inner" id="standardOutput">
         <div class="video-box" id="videoBox">
           <div class="placeholder" id="placeholder">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -187,6 +251,34 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
         <div>
           <div class="history-title">Recent Generations</div>
           <div class="history-grid" id="historyGrid"><div class="empty">No videos generated yet</div></div>
+        </div>
+      </div>
+      <div class="output-inner" id="interactiveOutput" style="display:none">
+        <div class="ix-video-grid">
+          <div>
+            <div class="ix-video-label">Last Generated Chunk</div>
+            <div class="video-box ix-video-small" id="ixChunkBox">
+              <div class="placeholder"><p>No chunk generated yet</p></div>
+            </div>
+          </div>
+          <div>
+            <div class="ix-video-label">Full Video So Far</div>
+            <div class="video-box ix-video-small" id="ixFullBox">
+              <div class="placeholder"><p>Generate chunks to build video</p></div>
+            </div>
+          </div>
+        </div>
+        <div id="ixChunkHistory">
+          <div class="history-title" style="margin-top:8px">Chunk Timeline</div>
+          <div id="ixHistoryTable" class="ix-history">
+            <div class="empty">No chunks generated yet</div>
+          </div>
+        </div>
+        <div id="ixFinalSection" style="display:none">
+          <div class="history-title" style="margin-top:16px">Final Video</div>
+          <div class="video-box" id="ixFinalBox">
+            <div class="placeholder"><p>Click Finalize to assemble complete video</p></div>
+          </div>
         </div>
       </div>
     </div>
@@ -270,6 +362,13 @@ function selectModel(id) {
   } else {
     cacheSection.classList.remove('visible');
   }
+
+  // Toggle interactive mode
+  const isIx = (id === 'longlive_interactive');
+  $('#standardSidebar').style.display = isIx ? 'none' : '';
+  $('#interactiveSidebar').style.display = isIx ? '' : 'none';
+  $('#standardOutput').style.display = isIx ? 'none' : '';
+  $('#interactiveOutput').style.display = isIx ? '' : 'none';
 }
 
 function toggleCacheParams() {
@@ -536,6 +635,286 @@ function replayVideo(path, prompt, name, elapsed) {
 
 loadModels(); loadGPUs(); loadHistory();
 setInterval(() => { loadModels(); loadGPUs(); }, 8000);
+
+// ---------------------------------------------------------------------------
+// Interactive chunk-by-chunk mode
+// ---------------------------------------------------------------------------
+let ixChunks = [];
+let ixCurrentChunk = 0;
+let ixIsSetup = false;
+let ixGroundingSet = false;
+let ixBusy = false;
+let ixLogPoll = null;
+let ixChunkDuration = 10;
+
+function ixSetStatus(text) {
+  $('#ixStatus').textContent = text;
+}
+
+function ixUpdateChunkInfo() {
+  const n = ixCurrentChunk + 1;
+  const s = ixCurrentChunk * ixChunkDuration;
+  const e = s + ixChunkDuration;
+  $('#ixChunkInfo').textContent = `Chunk ${n} (${s}-${e}s)`;
+}
+
+function ixUpdateNavButtons() {
+  const back = $('#ixBackBtn');
+  const fin = $('#ixFinalizeBtn');
+  if (back) back.disabled = (ixCurrentChunk === 0);
+  if (fin) fin.disabled = (ixCurrentChunk === 0);
+}
+
+function ixShowVideo(boxId, url) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const ph = box.querySelector('.placeholder');
+  if (ph) ph.style.display = 'none';
+  let v = box.querySelector('video');
+  if (!v) {
+    v = document.createElement('video');
+    v.controls = true; v.autoplay = true; v.loop = true;
+    box.appendChild(v);
+  }
+  v.src = url + '?t=' + Date.now();
+  v.style.display = 'block';
+}
+
+function ixClearVideo(boxId, text) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const v = box.querySelector('video');
+  if (v) { v.src = ''; v.style.display = 'none'; }
+  let ph = box.querySelector('.placeholder');
+  if (!ph) {
+    ph = document.createElement('div');
+    ph.className = 'placeholder';
+    ph.innerHTML = '<p></p>';
+    box.appendChild(ph);
+  }
+  ph.style.display = '';
+  ph.querySelector('p').textContent = text;
+}
+
+function ixRenderHistory() {
+  const el = $('#ixHistoryTable');
+  if (!ixChunks.length) {
+    el.innerHTML = '<div class="empty">No chunks generated yet</div>';
+    return;
+  }
+  el.innerHTML = ixChunks.map(c => `
+    <div class="ix-history-row">
+      <span class="num">${c.num}</span>
+      <span class="time">${c.time_range}</span>
+      <span class="prompt">${c.prompt}</span>
+    </div>
+  `).join('');
+}
+
+function ixStartLogPolling() {
+  if (ixLogPoll) return;
+  $('#ixLogSection').style.display = '';
+  ixLogPoll = setInterval(async () => {
+    try {
+      const d = await fetchJSON('/api/interactive/logs');
+      if (d.log) {
+        const el = $('#ixLogContent');
+        el.textContent = d.log;
+        el.parentElement.scrollTop = el.parentElement.scrollHeight;
+      }
+    } catch(e) {}
+  }, 3000);
+}
+
+function ixStopLogPolling() {
+  if (ixLogPoll) { clearInterval(ixLogPoll); ixLogPoll = null; }
+}
+
+async function ixSetup() {
+  if (ixBusy) return;
+  ixBusy = true;
+  const btn = $('#ixSetupBtn');
+  btn.disabled = true;
+  btn.textContent = 'Starting worker...';
+  ixSetStatus('Starting worker and loading model...\nThis takes 1-5 minutes on first run.');
+  ixStartLogPolling();
+
+  try {
+    const result = await fetchJSON('/api/interactive/setup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        seed: +(document.getElementById('ixSeed').value) || 42,
+        max_chunks: +(document.getElementById('ixMaxChunks').value) || 12,
+      }),
+    });
+    ixIsSetup = true;
+    ixSetStatus(
+      `Model loaded! Session: ${result.session_id}\n` +
+      `GPU: ${result.gpu || 'N/A'} | VRAM: ${result.vram_free || 'N/A'} | Load: ${result.load_time || 'N/A'}\n\n` +
+      `Describe the main scene below to set the visual grounding.`
+    );
+    btn.textContent = 'Model Ready';
+    $('#ixGroundingSection').style.display = '';
+    loadModels(); loadGPUs();
+  } catch (e) {
+    ixSetStatus(`Setup failed: ${e.message || e}`);
+    btn.disabled = false;
+    btn.textContent = 'Retry Setup';
+  }
+  ixBusy = false;
+}
+
+async function ixSetGrounding() {
+  if (ixBusy) return;
+  const g = $('#ixGrounding').value.trim();
+  if (!g) { ixSetStatus('Please enter a scene description.'); return; }
+  ixBusy = true;
+  ixSetStatus('Setting scene grounding...');
+
+  try {
+    await fetchJSON('/api/interactive/grounding', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ grounding: g, skip_ai: true }),
+    });
+    ixGroundingSet = true;
+    ixCurrentChunk = 0;
+    ixChunks = [];
+    ixSetStatus(`Scene set: "${g}"\n\nNow describe what happens in each ~${ixChunkDuration}s chunk.`);
+    ixUpdateChunkInfo();
+    ixUpdateNavButtons();
+    $('#ixChunkSection').style.display = '';
+  } catch (e) {
+    ixSetStatus(`Grounding failed: ${e.message || e}`);
+  }
+  ixBusy = false;
+}
+
+async function ixGenerateChunk() {
+  if (ixBusy) return;
+  const prompt = $('#ixChunkPrompt').value.trim();
+  if (!prompt) { ixSetStatus('Please enter a prompt for this chunk.'); return; }
+  ixBusy = true;
+  const btn = $('#ixGenBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  ixSetStatus(`Generating chunk ${ixCurrentChunk + 1}... (this may take 30-120s)`);
+
+  try {
+    const result = await fetchJSON('/api/interactive/generate_chunk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ user_prompt: prompt, skip_ai: true }),
+    });
+    ixChunks.push({
+      num: result.chunk_num,
+      time_range: result.time_range,
+      prompt: prompt,
+    });
+    ixCurrentChunk = result.chunk_num;
+
+    if (result.chunk_video_url) ixShowVideo('ixChunkBox', result.chunk_video_url);
+    if (result.running_video_url) ixShowVideo('ixFullBox', result.running_video_url);
+
+    ixRenderHistory();
+    ixUpdateChunkInfo();
+    ixUpdateNavButtons();
+    ixSetStatus(
+      `Chunk ${result.chunk_num} generated in ${result.generation_time}!\n` +
+      `Time range: ${result.time_range}\n\n` +
+      `Ready for chunk ${ixCurrentChunk + 1}. Enter next prompt or click Finalize.`
+    );
+    $('#ixChunkPrompt').value = '';
+  } catch (e) {
+    ixSetStatus(`Generation failed: ${e.message || e}`);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Generate Chunk';
+  ixBusy = false;
+}
+
+async function ixGoBack() {
+  if (ixBusy || ixCurrentChunk === 0) return;
+  ixBusy = true;
+  ixSetStatus('Going back one chunk...');
+  try {
+    const result = await fetchJSON('/api/interactive/go_back', { method: 'POST' });
+    if (result.status === 'error') {
+      ixSetStatus(result.message);
+    } else {
+      ixCurrentChunk = Math.max(0, ixCurrentChunk - 1);
+      if (ixChunks.length > ixCurrentChunk) ixChunks.length = ixCurrentChunk;
+      ixRenderHistory();
+      ixUpdateChunkInfo();
+      ixUpdateNavButtons();
+      ixSetStatus(`Went back. Now at chunk ${ixCurrentChunk + 1}.\nEnter a new prompt for this chunk.`);
+      try {
+        const st = await fetchJSON('/api/interactive/status');
+        if (st.last_chunk_url) ixShowVideo('ixChunkBox', st.last_chunk_url);
+        else ixClearVideo('ixChunkBox', 'No chunk generated yet');
+        if (st.running_video_url) ixShowVideo('ixFullBox', st.running_video_url);
+        else ixClearVideo('ixFullBox', 'Generate chunks to build video');
+      } catch(e) {}
+    }
+  } catch (e) {
+    ixSetStatus(`Go back failed: ${e.message || e}`);
+  }
+  ixBusy = false;
+}
+
+async function ixFinalize() {
+  if (ixBusy || ixCurrentChunk === 0) return;
+  ixBusy = true;
+  ixSetStatus('Assembling final video...');
+  try {
+    const result = await fetchJSON('/api/interactive/finalize', { method: 'POST' });
+    if (result.status === 'error') {
+      ixSetStatus(result.message);
+    } else {
+      ixSetStatus(
+        `Video finalized!\n` +
+        `Duration: ${result.duration} | Chunks: ${result.total_chunks}\n\n` +
+        `Click Reset to start a new video.`
+      );
+      if (result.final_video_url) {
+        $('#ixFinalSection').style.display = '';
+        ixShowVideo('ixFinalBox', result.final_video_url);
+      }
+    }
+  } catch (e) {
+    ixSetStatus(`Finalize failed: ${e.message || e}`);
+  }
+  ixBusy = false;
+}
+
+async function ixReset() {
+  if (ixBusy) return;
+  if (ixChunks.length > 0 && !confirm('Reset session? All generated chunks will be lost.')) return;
+  ixBusy = true;
+  ixSetStatus('Resetting session...');
+  try {
+    const result = await fetchJSON('/api/interactive/reset', { method: 'POST' });
+    ixGroundingSet = false;
+    ixCurrentChunk = 0;
+    ixChunks = [];
+    $('#ixChunkSection').style.display = 'none';
+    $('#ixFinalSection').style.display = 'none';
+    $('#ixGrounding').value = '';
+    $('#ixChunkPrompt').value = '';
+    ixClearVideo('ixChunkBox', 'No chunk generated yet');
+    ixClearVideo('ixFullBox', 'Generate chunks to build video');
+    ixRenderHistory();
+    ixUpdateNavButtons();
+    ixSetStatus(
+      `Session reset! New session: ${result.new_session_id}\n\n` +
+      `Describe the main scene below.`
+    );
+  } catch (e) {
+    ixSetStatus(`Reset failed: ${e.message || e}`);
+  }
+  ixBusy = false;
+}
 </script>
 </body>
 </html>
