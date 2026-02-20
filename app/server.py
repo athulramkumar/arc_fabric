@@ -157,6 +157,16 @@ MODELS: dict[str, ModelInfo] = {
         default_frames=97, default_steps=30, fps=24,
         worker_script=str(ROOT / "workers" / "ltx_worker.py"),
     ),
+    "hybrid_ltx": ModelInfo(
+        id="hybrid_ltx",
+        display_name="LTX-Video — Hybrid (13B+2B)",
+        description="Hybrid schedule: 13B for structure (70%), 2B for refinement (30%). Best quality-speed tradeoff.",
+        conda_env=str(ROOT / "envs" / "af-ltx"),
+        gpu_memory_gb=60.0,
+        default_height=480, default_width=704,
+        default_frames=97, default_steps=10, fps=24,
+        worker_script=str(ROOT / "workers" / "hybrid_ltx_worker.py"),
+    ),
 }
 
 gpu_assignments: dict[int, Optional[str]] = {i: None for i in range(GPU_COUNT)}

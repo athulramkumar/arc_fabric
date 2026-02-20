@@ -42,6 +42,9 @@ class GenerateRequest(PydanticModel):
     seed: int = 42
     session_id: Optional[str] = None
     output_dir: Optional[str] = None
+    cache_start_step: Optional[int] = None
+    cache_end_step: Optional[int] = None
+    cache_interval: int = 3
 
 
 class GenerateResponse(PydanticModel):
@@ -218,6 +221,9 @@ async def generate(req: GenerateRequest):
             offload_to_cpu=False,
             device=device,
             enhance_prompt=False,
+            cache_start_step=req.cache_start_step,
+            cache_end_step=req.cache_end_step,
+            cache_interval=req.cache_interval,
         ).images
 
         (pad_left, pad_right, pad_top, pad_bottom) = padding

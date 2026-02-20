@@ -175,7 +175,7 @@ async function fetchJSON(url, opts) {
 function getFamily(id) {
   if (id.startsWith('wan21') || id.startsWith('hybrid_wan')) return 'Wan 2.1';
   if (id.startsWith('longlive')) return 'LongLive';
-  if (id.startsWith('ltx')) return 'LTX-Video';
+  if (id.startsWith('ltx') || id.startsWith('hybrid_ltx')) return 'LTX-Video';
   return 'Other';
 }
 

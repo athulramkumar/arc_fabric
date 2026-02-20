@@ -38,6 +38,9 @@ class GenerateRequest(PydanticModel):
     guidance_scale: float = 5.0
     session_id: Optional[str] = None
     output_dir: Optional[str] = None
+    cache_start_step: Optional[int] = None
+    cache_end_step: Optional[int] = None
+    cache_interval: int = 3
 
 
 class GenerateResponse(PydanticModel):
@@ -115,6 +118,9 @@ async def generate(req: GenerateRequest):
             guide_scale=req.guidance_scale,
             seed=req.seed,
             offload_model=False,
+            cache_start_step=req.cache_start_step,
+            cache_end_step=req.cache_end_step,
+            cache_interval=req.cache_interval,
         )
 
         cache_video(
