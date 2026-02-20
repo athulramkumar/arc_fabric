@@ -553,7 +553,7 @@ def _run_generation(job: Job):
         payload = _build_payload(job, worker, schedule_override)
 
         logger.info(f"Job {job.job_id}: POST {url}")
-        r = http_requests.post(url, json=payload, timeout=600)
+        r = http_requests.post(url, json=payload, timeout=1800)
         result = r.json()
 
         if result.get("status") == "success":
