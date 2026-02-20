@@ -110,7 +110,7 @@ MODELS: dict[str, ModelInfo] = {
     "longlive_interactive": ModelInfo(
         id="longlive_interactive",
         display_name="LongLive — Interactive",
-        description="Interactive chunk-by-chunk generation. Change prompts mid-video with KV cache continuity.",
+        description="Interactive chunk-by-chunk generation with AI prompt enhancement and context carryover.",
         conda_env=str(ROOT / "envs" / "af-longlive"),
         gpu_memory_gb=25.0,
         default_height=480, default_width=832,
@@ -757,13 +757,25 @@ class InteractiveSetupRequest(BaseModel):
 
 class InteractiveGroundingRequest(BaseModel):
     grounding: str
-    skip_ai: bool = True
+    skip_ai: bool = False
+
+
+class InteractiveAcceptGroundingRequest(BaseModel):
+    enhanced: str
+
+
+class InteractiveRegenerateGroundingRequest(BaseModel):
+    grounding: str
 
 
 class InteractiveChunkRequest(BaseModel):
     user_prompt: str
     processed_prompt: Optional[str] = None
-    skip_ai: bool = True
+    skip_ai: bool = False
+
+
+class InteractiveEnhanceChunkRequest(BaseModel):
+    user_prompt: str
 
 
 _interactive_session: dict = {"session_id": None, "session_dir": None}
@@ -823,6 +835,62 @@ async def api_interactive_grounding(req: InteractiveGroundingRequest):
         raise
     except Exception as e:
         raise HTTPException(502, f"Grounding failed: {e}")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return r.json()
+
+
+@app.post("/api/interactive/accept_grounding")
+async def api_interactive_accept_grounding(req: InteractiveAcceptGroundingRequest):
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/accept_grounding", json=req.dict(), timeout=30)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Accept grounding failed: {e}")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return r.json()
+
+
+@app.post("/api/interactive/regenerate_grounding")
+async def api_interactive_regenerate_grounding(req: InteractiveRegenerateGroundingRequest):
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/regenerate_grounding", json=req.dict(), timeout=60)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Regenerate grounding failed: {e}")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return r.json()
+
+
+@app.post("/api/interactive/enhance_chunk")
+async def api_interactive_enhance_chunk(req: InteractiveEnhanceChunkRequest):
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/enhance_chunk", json=req.dict(), timeout=60)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Enhance chunk failed: {e}")
+    MODELS["longlive_interactive"].last_used = time.time()
+    return r.json()
+
+
+@app.post("/api/interactive/regenerate_chunk_prompt")
+async def api_interactive_regenerate_chunk_prompt(req: InteractiveEnhanceChunkRequest):
+    url = _interactive_worker_url()
+    try:
+        r = http_requests.post(f"{url}/regenerate_chunk_prompt", json=req.dict(), timeout=60)
+        r.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Regenerate chunk prompt failed: {e}")
     MODELS["longlive_interactive"].last_used = time.time()
     return r.json()
 

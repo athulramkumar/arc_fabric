@@ -147,6 +147,17 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 .ix-history-row .time{color:var(--text3);min-width:55px}
 .ix-history-row .prompt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ix-step-badge{display:inline-block;font-size:9px;font-weight:700;padding:2px 6px;border-radius:6px;background:var(--accent-bg);color:var(--accent2);margin-bottom:6px}
+.ix-toggle{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:11px;font-weight:600;color:var(--text2);margin:6px 0}
+.ix-toggle input[type=checkbox]{width:14px;height:14px;accent-color:var(--accent)}
+.ix-review-box{margin-top:6px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px}
+.ix-review-box textarea{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;color:var(--text);font-family:'SF Mono',Monaco,Consolas,monospace;font-size:11px;line-height:1.5;resize:vertical;min-height:80px}
+.ix-review-box .ix-review-actions{display:flex;gap:6px;margin-top:6px}
+.ix-review-box .ix-review-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);margin-bottom:4px}
+.ix-review-btn{padding:6px 14px;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;transition:opacity .12s}
+.ix-review-btn:hover{opacity:.85}
+.ix-review-btn:disabled{opacity:.4;cursor:not-allowed}
+.ix-review-btn.accept{background:var(--accent);color:#fff}
+.ix-review-btn.regen{background:var(--surface3);color:var(--text2)}
 
 @media(max-width:600px){.main{flex-direction:column}.sidebar{max-width:none;min-width:0;border-right:none;border-bottom:1px solid var(--border)}.ix-video-grid{grid-template-columns:1fr}}
 </style>
@@ -202,6 +213,10 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
             <div class="param-group"><label>Seed</label><input type="number" id="ixSeed" value="42"></div>
             <div class="param-group"><label>Max Chunks</label><input type="number" id="ixMaxChunks" value="12"></div>
           </div>
+          <label class="ix-toggle" style="margin-top:8px">
+            <input type="checkbox" id="ixSkipAI">
+            Skip AI prompt enhancement
+          </label>
         </div>
         <div class="section" id="ixGroundingSection" style="display:none">
           <div class="ix-step-badge">Step 1</div>
@@ -210,7 +225,15 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
             <label>Scene Description (grounding)</label>
             <textarea id="ixGrounding" placeholder="e.g., A young woman with red hair standing in a misty forest at dawn" style="min-height:56px"></textarea>
           </div>
-          <button class="gen-btn" onclick="ixSetGrounding()" style="margin-top:6px">Set Scene</button>
+          <button class="gen-btn" id="ixGroundingBtn" onclick="ixSetGrounding()" style="margin-top:6px">Enhance &amp; Set Scene</button>
+          <div id="ixGroundingReview" class="ix-review-box" style="display:none">
+            <div class="ix-review-label">Enhanced Grounding (edit if needed)</div>
+            <textarea id="ixGroundingEnhanced"></textarea>
+            <div class="ix-review-actions">
+              <button class="ix-review-btn accept" onclick="ixAcceptGrounding()">Accept</button>
+              <button class="ix-review-btn regen" onclick="ixRegenGrounding()">Regenerate</button>
+            </div>
+          </div>
         </div>
         <div class="section" id="ixChunkSection" style="display:none">
           <div class="ix-step-badge">Step 2</div>
@@ -220,7 +243,15 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
             <label>What happens in this chunk?</label>
             <textarea id="ixChunkPrompt" placeholder="e.g., she slowly turns to face the camera, wind blowing through her hair" style="min-height:56px"></textarea>
           </div>
-          <button class="gen-btn" id="ixGenBtn" onclick="ixGenerateChunk()">Generate Chunk</button>
+          <button class="gen-btn" id="ixEnhanceBtn" onclick="ixEnhanceChunk()">Enhance Prompt</button>
+          <div id="ixChunkReview" class="ix-review-box" style="display:none">
+            <div class="ix-review-label">Enhanced Prompt (edit if needed)</div>
+            <textarea id="ixChunkEnhanced"></textarea>
+            <div class="ix-review-actions">
+              <button class="ix-review-btn accept" id="ixGenBtn" onclick="ixGenerateChunk()">Generate Chunk</button>
+              <button class="ix-review-btn regen" onclick="ixRegenChunk()">Regenerate</button>
+            </div>
+          </div>
           <div class="ix-nav-row">
             <button class="ix-nav-btn back" onclick="ixGoBack()" id="ixBackBtn" disabled>Back</button>
             <button class="ix-nav-btn reset" onclick="ixReset()">Reset</button>
@@ -647,6 +678,8 @@ let ixBusy = false;
 let ixLogPoll = null;
 let ixChunkDuration = 10;
 
+function ixSkipAI() { return $('#ixSkipAI').checked; }
+
 function ixSetStatus(text) {
   $('#ixStatus').textContent = text;
 }
@@ -770,31 +803,144 @@ async function ixSetGrounding() {
   const g = $('#ixGrounding').value.trim();
   if (!g) { ixSetStatus('Please enter a scene description.'); return; }
   ixBusy = true;
-  ixSetStatus('Setting scene grounding...');
+  const skipAI = ixSkipAI();
+  const btn = $('#ixGroundingBtn');
+  btn.disabled = true;
+  btn.textContent = skipAI ? 'Setting scene...' : 'Enhancing with AI...';
+  ixSetStatus(skipAI ? 'Setting scene grounding...' : 'Enhancing grounding with AI...');
 
   try {
-    await fetchJSON('/api/interactive/grounding', {
+    const result = await fetchJSON('/api/interactive/grounding', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ grounding: g, skip_ai: true }),
+      body: JSON.stringify({ grounding: g, skip_ai: skipAI }),
+    });
+
+    if (!skipAI && result.needs_review) {
+      $('#ixGroundingEnhanced').value = result.enhanced || '';
+      $('#ixGroundingReview').style.display = '';
+      ixSetStatus('AI enhanced the grounding. Review and edit below, then click Accept.');
+    } else {
+      ixGroundingSet = true;
+      ixCurrentChunk = 0;
+      ixChunks = [];
+      ixSetStatus(`Scene set: "${g}"\n\nNow describe what happens in each ~${ixChunkDuration}s chunk.`);
+      ixUpdateChunkInfo();
+      ixUpdateNavButtons();
+      $('#ixChunkSection').style.display = '';
+      $('#ixGroundingReview').style.display = 'none';
+    }
+  } catch (e) {
+    ixSetStatus(`Grounding failed: ${e.message || e}`);
+  }
+  btn.disabled = false;
+  btn.textContent = ixSkipAI() ? 'Set Scene' : 'Enhance & Set Scene';
+  ixBusy = false;
+}
+
+async function ixAcceptGrounding() {
+  if (ixBusy) return;
+  ixBusy = true;
+  const enhanced = $('#ixGroundingEnhanced').value.trim();
+  ixSetStatus('Accepting grounding...');
+  try {
+    await fetchJSON('/api/interactive/accept_grounding', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enhanced }),
     });
     ixGroundingSet = true;
     ixCurrentChunk = 0;
     ixChunks = [];
-    ixSetStatus(`Scene set: "${g}"\n\nNow describe what happens in each ~${ixChunkDuration}s chunk.`);
+    ixSetStatus(`Scene accepted!\n\nNow describe what happens in each ~${ixChunkDuration}s chunk.`);
     ixUpdateChunkInfo();
     ixUpdateNavButtons();
     $('#ixChunkSection').style.display = '';
+    $('#ixGroundingReview').style.display = 'none';
   } catch (e) {
-    ixSetStatus(`Grounding failed: ${e.message || e}`);
+    ixSetStatus(`Accept failed: ${e.message || e}`);
+  }
+  ixBusy = false;
+}
+
+async function ixRegenGrounding() {
+  if (ixBusy) return;
+  ixBusy = true;
+  const g = $('#ixGrounding').value.trim();
+  ixSetStatus('Regenerating AI enhancement...');
+  try {
+    const result = await fetchJSON('/api/interactive/regenerate_grounding', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ grounding: g }),
+    });
+    $('#ixGroundingEnhanced').value = result.enhanced || '';
+    ixSetStatus('Regenerated. Review and click Accept.');
+  } catch (e) {
+    ixSetStatus(`Regeneration failed: ${e.message || e}`);
+  }
+  ixBusy = false;
+}
+
+async function ixEnhanceChunk() {
+  if (ixBusy) return;
+  const prompt = $('#ixChunkPrompt').value.trim();
+  if (!prompt) { ixSetStatus('Please enter a prompt for this chunk.'); return; }
+
+  if (ixSkipAI()) {
+    $('#ixChunkEnhanced').value = prompt;
+    $('#ixChunkReview').style.display = '';
+    ixSetStatus('Using prompt directly (no AI). Click Generate Chunk.');
+    return;
+  }
+
+  ixBusy = true;
+  const btn = $('#ixEnhanceBtn');
+  btn.disabled = true;
+  btn.textContent = 'Enhancing...';
+  ixSetStatus('Enhancing prompt with AI...');
+
+  try {
+    const result = await fetchJSON('/api/interactive/enhance_chunk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ user_prompt: prompt }),
+    });
+    $('#ixChunkEnhanced').value = result.enhanced || prompt;
+    $('#ixChunkReview').style.display = '';
+    ixSetStatus('Prompt enhanced! Review below, then click Generate Chunk.');
+  } catch (e) {
+    ixSetStatus(`Enhancement failed: ${e.message || e}`);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Enhance Prompt';
+  ixBusy = false;
+}
+
+async function ixRegenChunk() {
+  if (ixBusy) return;
+  ixBusy = true;
+  const prompt = $('#ixChunkPrompt').value.trim();
+  ixSetStatus('Regenerating AI enhancement...');
+  try {
+    const result = await fetchJSON('/api/interactive/regenerate_chunk_prompt', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ user_prompt: prompt }),
+    });
+    $('#ixChunkEnhanced').value = result.enhanced || '';
+    ixSetStatus('Regenerated. Review and click Generate Chunk.');
+  } catch (e) {
+    ixSetStatus(`Regeneration failed: ${e.message || e}`);
   }
   ixBusy = false;
 }
 
 async function ixGenerateChunk() {
   if (ixBusy) return;
-  const prompt = $('#ixChunkPrompt').value.trim();
-  if (!prompt) { ixSetStatus('Please enter a prompt for this chunk.'); return; }
+  const userPrompt = $('#ixChunkPrompt').value.trim();
+  const processedPrompt = $('#ixChunkEnhanced').value.trim();
+  if (!userPrompt && !processedPrompt) { ixSetStatus('Please enter a prompt for this chunk.'); return; }
   ixBusy = true;
   const btn = $('#ixGenBtn');
   btn.disabled = true;
@@ -805,12 +951,16 @@ async function ixGenerateChunk() {
     const result = await fetchJSON('/api/interactive/generate_chunk', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ user_prompt: prompt, skip_ai: true }),
+      body: JSON.stringify({
+        user_prompt: userPrompt || processedPrompt,
+        processed_prompt: processedPrompt || userPrompt,
+        skip_ai: ixSkipAI(),
+      }),
     });
     ixChunks.push({
       num: result.chunk_num,
       time_range: result.time_range,
-      prompt: prompt,
+      prompt: userPrompt || processedPrompt,
     });
     ixCurrentChunk = result.chunk_num;
 
@@ -826,6 +976,8 @@ async function ixGenerateChunk() {
       `Ready for chunk ${ixCurrentChunk + 1}. Enter next prompt or click Finalize.`
     );
     $('#ixChunkPrompt').value = '';
+    $('#ixChunkEnhanced').value = '';
+    $('#ixChunkReview').style.display = 'none';
   } catch (e) {
     ixSetStatus(`Generation failed: ${e.message || e}`);
   }
@@ -848,6 +1000,7 @@ async function ixGoBack() {
       ixRenderHistory();
       ixUpdateChunkInfo();
       ixUpdateNavButtons();
+      $('#ixChunkReview').style.display = 'none';
       ixSetStatus(`Went back. Now at chunk ${ixCurrentChunk + 1}.\nEnter a new prompt for this chunk.`);
       try {
         const st = await fetchJSON('/api/interactive/status');
@@ -900,8 +1053,12 @@ async function ixReset() {
     ixChunks = [];
     $('#ixChunkSection').style.display = 'none';
     $('#ixFinalSection').style.display = 'none';
+    $('#ixGroundingReview').style.display = 'none';
+    $('#ixChunkReview').style.display = 'none';
     $('#ixGrounding').value = '';
     $('#ixChunkPrompt').value = '';
+    $('#ixChunkEnhanced').value = '';
+    $('#ixGroundingEnhanced').value = '';
     ixClearVideo('ixChunkBox', 'No chunk generated yet');
     ixClearVideo('ixFullBox', 'Generate chunks to build video');
     ixRenderHistory();
@@ -915,6 +1072,23 @@ async function ixReset() {
   }
   ixBusy = false;
 }
+
+// Update button text when skip_ai changes
+document.addEventListener('DOMContentLoaded', () => {
+  const skipCb = document.getElementById('ixSkipAI');
+  if (skipCb) {
+    skipCb.addEventListener('change', () => {
+      const btn = document.getElementById('ixGroundingBtn');
+      if (btn && !btn.disabled) {
+        btn.textContent = skipCb.checked ? 'Set Scene' : 'Enhance & Set Scene';
+      }
+      const enhBtn = document.getElementById('ixEnhanceBtn');
+      if (enhBtn && !enhBtn.disabled) {
+        enhBtn.textContent = skipCb.checked ? 'Use Prompt' : 'Enhance Prompt';
+      }
+    });
+  }
+});
 </script>
 </body>
 </html>

@@ -53,13 +53,17 @@ class SetupRequest(PydanticModel):
 
 class GroundingRequest(PydanticModel):
     grounding: str
-    skip_ai: bool = True
+    skip_ai: bool = False
 
 
 class GenerateChunkRequest(PydanticModel):
     user_prompt: str
     processed_prompt: Optional[str] = None
-    skip_ai: bool = True
+    skip_ai: bool = False
+
+
+class EnhanceChunkRequest(PydanticModel):
+    user_prompt: str
 
 
 class GenerateRequest(PydanticModel):
@@ -124,6 +128,20 @@ def _ensure_grounding() -> "VideoBuilderState":
     return b
 
 
+def _get_anthropic_key() -> str:
+    """Get Anthropic API key from environment or bash_aliases."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        bash_aliases = "/root/.bash_aliases"
+        if os.path.exists(bash_aliases):
+            with open(bash_aliases) as f:
+                for line in f:
+                    if "ANTHROPIC_API_KEY" in line and "export" in line:
+                        api_key = line.split("=")[1].strip().strip('"\'')
+                        break
+    return api_key or ""
+
+
 def _create_builder(
     config_path: str = "configs/longlive_inference.yaml",
     output_dir: str = "videos/interactive_web",
@@ -131,14 +149,14 @@ def _create_builder(
     max_chunks: int = 12,
     seed: int = 42,
 ) -> "VideoBuilderState":
-    """Instantiate a new VideoBuilderState, passing a dummy Anthropic key
-    since we operate with skip_ai=True (no Claude calls)."""
+    """Instantiate a new VideoBuilderState with the Anthropic key for
+    AI prompt enhancement."""
     from web_ui.video_builder_state import VideoBuilderState
 
     return VideoBuilderState(
         config_path=config_path,
         output_dir=output_dir,
-        anthropic_key="unused-skip-ai",
+        anthropic_key=_get_anthropic_key(),
         chunk_duration=chunk_duration,
         max_chunks=max_chunks,
         seed=seed,
@@ -199,16 +217,27 @@ async def setup(req: SetupRequest = SetupRequest()):
 
 @app.post("/grounding")
 async def set_grounding(req: GroundingRequest):
-    """Set the initial scene description (grounding) for the video."""
+    """Set the initial scene description (grounding) for the video.
+
+    When skip_ai is False, the grounding is enhanced via Claude and the
+    enhanced (structured JSON) version is returned for the user to review.
+    The caller should then POST /accept_grounding with the final text.
+
+    When skip_ai is True, the grounding is accepted immediately.
+    """
     b = _ensure_setup()
 
     try:
         grounding_result = b.set_grounding(req.grounding, skip_ai=req.skip_ai)
         enhanced = grounding_result["enhanced"]
-        b.accept_grounding(enhanced)
-        logger.info(f"Grounding set: {req.grounding[:80]}...")
+
+        if req.skip_ai:
+            b.accept_grounding(enhanced)
+
+        logger.info(f"Grounding set (skip_ai={req.skip_ai}): {req.grounding[:80]}...")
         return {
             "status": "success",
+            "needs_review": not req.skip_ai,
             **grounding_result,
         }
     except Exception as e:
@@ -216,17 +245,94 @@ async def set_grounding(req: GroundingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/accept_grounding")
+async def accept_grounding(req: dict):
+    """Accept a (possibly edited) enhanced grounding prompt."""
+    b = _ensure_setup()
+    enhanced = req.get("enhanced", "")
+    if not enhanced:
+        raise HTTPException(status_code=400, detail="Missing 'enhanced' field")
+    try:
+        b.accept_grounding(enhanced)
+        logger.info(f"Grounding accepted: {enhanced[:80]}...")
+        return {"status": "success"}
+    except Exception as e:
+        logger.exception("Accept grounding failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/regenerate_grounding")
+async def regenerate_grounding(req: dict):
+    """Regenerate the AI-enhanced grounding."""
+    b = _ensure_setup()
+    grounding = req.get("grounding", "")
+    if not grounding:
+        raise HTTPException(status_code=400, detail="Missing 'grounding' field")
+    try:
+        enhanced = b.regenerate_grounding(grounding)
+        return {"status": "success", "enhanced": enhanced}
+    except Exception as e:
+        logger.exception("Regenerate grounding failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/enhance_chunk")
+async def enhance_chunk(req: EnhanceChunkRequest):
+    """Enhance a chunk prompt via Claude without generating video.
+
+    Returns the structured JSON prompt for the user to review/edit.
+    """
+    b = _ensure_grounding()
+    try:
+        enhanced = b.enhance_chunk_prompt(req.user_prompt)
+        logger.info(f"Chunk prompt enhanced: {req.user_prompt[:60]}...")
+        return {"status": "success", "enhanced": enhanced, "user_prompt": req.user_prompt}
+    except Exception as e:
+        logger.exception("Enhance chunk failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/regenerate_chunk_prompt")
+async def regenerate_chunk_prompt(req: EnhanceChunkRequest):
+    """Regenerate the AI-enhanced chunk prompt."""
+    b = _ensure_grounding()
+    try:
+        enhanced = b.regenerate_chunk_prompt(req.user_prompt)
+        return {"status": "success", "enhanced": enhanced}
+    except Exception as e:
+        logger.exception("Regenerate chunk prompt failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/generate_chunk")
 async def generate_chunk(req: GenerateChunkRequest):
-    """Generate the next video chunk. Prompt can differ from previous chunks."""
+    """Generate the next video chunk. Prompt can differ from previous chunks.
+
+    If processed_prompt is structured JSON (from AI enhancement), it is
+    converted to a flat text prompt for the video model while the structured
+    state is stored for continuity.
+    """
     b = _ensure_grounding()
 
     processed = req.processed_prompt or req.user_prompt
 
+    import json as _json
+
+    video_prompt = processed
+    try:
+        state = _json.loads(processed)
+        if isinstance(state, dict) and "subject" in state:
+            video_prompt = b.enhancer._structured_to_video_prompt(state)
+            if state not in b.enhancer.structured_states:
+                b.enhancer.structured_states.append(state)
+            logger.info(f"Converted JSON prompt to flat: {video_prompt[:80]}...")
+    except (_json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
     try:
         result = b.generate_chunk(
             user_prompt=req.user_prompt,
-            processed_prompt=processed,
+            processed_prompt=video_prompt,
             skip_ai=req.skip_ai,
         )
         logger.info(
