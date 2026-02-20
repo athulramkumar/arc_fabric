@@ -142,6 +142,56 @@ def _get_anthropic_key() -> str:
     return api_key or ""
 
 
+_CLAUDE_MODELS = ["claude-sonnet-4-20250514", "claude-3-haiku-20240307"]
+_CLAUDE_MAX_RETRIES = 3
+_CLAUDE_RETRY_BASE_DELAY = 2.0
+
+
+def _patch_enhancer(enhancer) -> None:
+    """Replace the enhancer's _call_claude with a version that has proper
+    retry logic and model fallback so 529 overloaded errors are handled."""
+    import anthropic as _anthropic
+
+    original_system_prompt = enhancer.SYSTEM_PROMPT
+    client = enhancer.client
+
+    def _robust_call_claude(message: str) -> str:
+        last_err = None
+        for model in _CLAUDE_MODELS:
+            for attempt in range(_CLAUDE_MAX_RETRIES):
+                try:
+                    resp = client.messages.create(
+                        model=model,
+                        max_tokens=1000,
+                        system=original_system_prompt,
+                        messages=[{"role": "user", "content": message}],
+                    )
+                    return resp.content[0].text.strip()
+                except _anthropic.APIStatusError as e:
+                    last_err = e
+                    if e.status_code == 529:
+                        delay = _CLAUDE_RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            f"Claude {model} overloaded (529), "
+                            f"retry {attempt+1}/{_CLAUDE_MAX_RETRIES} in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.warning(f"Claude {model} error {e.status_code}: {e}")
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"Claude {model} unexpected error: {e}")
+                    break
+            logger.info(f"Model {model} exhausted, trying next fallback")
+
+        logger.error(f"All Claude models failed: {last_err}")
+        return ""
+
+    enhancer._call_claude = _robust_call_claude
+    logger.info(f"Patched enhancer with robust _call_claude (models: {_CLAUDE_MODELS})")
+
+
 def _create_builder(
     config_path: str = "configs/longlive_inference.yaml",
     output_dir: str = "videos/interactive_web",
@@ -207,6 +257,8 @@ async def setup(req: SetupRequest = SetupRequest()):
     try:
         result = builder.setup()
         _is_model_loaded = True
+        if builder.enhancer:
+            _patch_enhancer(builder.enhancer)
         logger.info(f"Session ready: {result.get('session_id')}")
         return result
     except Exception as e:
