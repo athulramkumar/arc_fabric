@@ -49,10 +49,14 @@ def setup_symlinks():
 
     wan_link = MODELS_DIR / "wan_models" / "Wan2.1-T2V-1.3B"
     wan_link.parent.mkdir(parents=True, exist_ok=True)
+    if wan_link.is_symlink():
+        wan_link.unlink()
     if not wan_link.exists():
         wan_link.symlink_to(WEIGHTS_DIR / "Wan2.1-T2V-1.3B")
 
     ll_link = MODELS_DIR / "longlive_models"
+    if ll_link.is_symlink():
+        ll_link.unlink()
     if not ll_link.exists():
         ll_link.symlink_to(WEIGHTS_DIR / "LongLive")
 

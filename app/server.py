@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -169,18 +170,100 @@ MODELS: dict[str, ModelInfo] = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# Model sharing: hybrid workers can serve standalone model requests
+# ---------------------------------------------------------------------------
+HYBRID_PROVIDERS: dict[str, dict[str, list]] = {
+    "hybrid_ltx": {
+        "ltx_2b": [["2B", 9999]],
+        "ltx_13b": [["13B", 9999]],
+    },
+    "hybrid_wan21": {
+        "wan21_1_3b": [["1.3B", 9999]],
+        "wan21_14b": [["14B", 9999]],
+    },
+}
+
+SHARED_BY: dict[str, str] = {}
+for _hybrid_id, _subs in HYBRID_PROVIDERS.items():
+    for _sub_id in _subs:
+        SHARED_BY[_sub_id] = _hybrid_id
+
+_LTX_MODELS = {"ltx_2b", "ltx_2b_dev", "ltx_13b", "ltx_13b_dev", "hybrid_ltx"}
+
 gpu_assignments: dict[int, Optional[str]] = {i: None for i in range(GPU_COUNT)}
 _next_port = WORKER_BASE_PORT
+_gpu_lock = threading.RLock()
+_model_start_locks: dict[str, threading.Lock] = {mid: threading.Lock() for mid in MODELS}
 
 
 # ---------------------------------------------------------------------------
 # Worker lifecycle
 # ---------------------------------------------------------------------------
+def _cleanup_stale_workers():
+    """Kill any leftover worker processes from a previous server run."""
+    for port in range(WORKER_BASE_PORT, WORKER_BASE_PORT + 100):
+        try:
+            out = subprocess.check_output(
+                ["fuser", f"{port}/tcp"], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+            if out:
+                for pid_str in out.split():
+                    try:
+                        pid = int(pid_str)
+                        logger.info(f"Killing stale process PID {pid} on port {port}")
+                        os.kill(pid, signal.SIGKILL)
+                    except (ValueError, ProcessLookupError):
+                        pass
+        except subprocess.CalledProcessError:
+            pass
+    time.sleep(1)
+
+
+def _is_port_free(port: int) -> bool:
+    """Check if a port is free before attempting to use it."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
 def _get_next_port() -> int:
     global _next_port
+    while not _is_port_free(_next_port):
+        logger.warning(f"Port {_next_port} is in use, skipping")
+        _next_port += 1
     port = _next_port
     _next_port += 1
     return port
+
+
+def _release_gpu(model: ModelInfo):
+    """Release a model's GPU slot from the assignment table."""
+    with _gpu_lock:
+        if model.gpu_id is not None:
+            if gpu_assignments.get(model.gpu_id) == model.id:
+                gpu_assignments[model.gpu_id] = None
+                logger.info(f"Released GPU {model.gpu_id} from {model.id}")
+            model.gpu_id = None
+
+
+def _kill_worker(model: ModelInfo):
+    """Kill a worker subprocess and release all resources including GPU slot."""
+    if model.worker_proc:
+        try:
+            os.kill(model.worker_proc.pid, signal.SIGTERM)
+            model.worker_proc.wait(timeout=10)
+        except Exception:
+            try:
+                os.kill(model.worker_proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+    _release_gpu(model)
+    model.worker_proc = None
+    model.worker_port = None
+    model.status = ModelStatus.COLD
+    model.error_msg = None
+    logger.info(f"Worker {model.id} stopped, resources released")
 
 
 def _start_worker(model: ModelInfo, gpu_id: int) -> bool:
@@ -209,9 +292,11 @@ def _start_worker(model: ModelInfo, gpu_id: int) -> bool:
     model.gpu_id = gpu_id
     model.status = ModelStatus.WARMING
 
-    # Wait for worker to become healthy
+    # Give the subprocess a moment to crash if port is already taken
+    time.sleep(2)
+
     url = f"http://127.0.0.1:{port}/health"
-    deadline = time.time() + 180  # 3 min timeout for model loading
+    deadline = time.time() + 300
     while time.time() < deadline:
         if proc.poll() is not None:
             model.status = ModelStatus.ERROR
@@ -221,13 +306,23 @@ def _start_worker(model: ModelInfo, gpu_id: int) -> bool:
             except Exception:
                 pass
             logger.error(f"Worker {model.id} crashed: {model.error_msg}")
+            _release_gpu(model)
             return False
         try:
             r = http_requests.get(url, timeout=2)
             if r.status_code == 200 and r.json().get("status") == "ready":
+                # Verify our subprocess is still alive — guards against a stale
+                # process on the same port answering the health check.
+                time.sleep(0.5)
+                if proc.poll() is not None:
+                    logger.warning(
+                        f"Worker {model.id} health OK but subprocess died "
+                        f"(stale process on port {port}?)"
+                    )
+                    continue
                 model.status = ModelStatus.WARM
                 model.last_used = time.time()
-                logger.info(f"Worker {model.id} is ready on port {port}")
+                logger.info(f"Worker {model.id} is ready on GPU {gpu_id}, port {port}")
                 return True
         except Exception:
             pass
@@ -239,72 +334,117 @@ def _start_worker(model: ModelInfo, gpu_id: int) -> bool:
     return False
 
 
-def _kill_worker(model: ModelInfo):
-    """Kill a worker subprocess and free resources."""
-    if model.worker_proc:
-        try:
-            os.kill(model.worker_proc.pid, signal.SIGTERM)
-            model.worker_proc.wait(timeout=10)
-        except Exception:
-            try:
-                os.kill(model.worker_proc.pid, signal.SIGKILL)
-            except Exception:
-                pass
-    model.worker_proc = None
-    model.worker_port = None
-    model.status = ModelStatus.COLD
-    model.error_msg = None
-    logger.info(f"Worker {model.id} stopped")
+def _is_worker_alive(model: ModelInfo) -> bool:
+    """Check if the worker process is running. Auto-recovers status if needed."""
+    if model.worker_proc is None:
+        return False
+    if model.worker_proc.poll() is not None:
+        logger.warning(f"Worker {model.id} process died (was on GPU {model.gpu_id})")
+        _release_gpu(model)
+        model.status = ModelStatus.COLD
+        model.worker_proc = None
+        model.worker_port = None
+        return False
+    if model.status == ModelStatus.ERROR:
+        logger.info(f"Worker {model.id} process alive — recovering to WARM")
+        model.status = ModelStatus.WARM
+        model.error_msg = None
+    return model.status == ModelStatus.WARM
 
 
 def _assign_gpu(model_id: str, preferred: Optional[int] = None) -> int:
-    """Assign a GPU. If model already warm, return its GPU. Otherwise allocate or evict LRU."""
+    """Thread-safe GPU assignment with LRU eviction."""
+    with _gpu_lock:
+        model = MODELS[model_id]
+
+        # Already assigned and alive (WARM or still WARMING)
+        if model.gpu_id is not None and model.status in (ModelStatus.WARM, ModelStatus.WARMING):
+            return model.gpu_id
+
+        # Clean up stale assignment if model is COLD/ERROR but still holds a GPU slot
+        if model.gpu_id is not None:
+            if gpu_assignments.get(model.gpu_id) == model_id:
+                gpu_assignments[model.gpu_id] = None
+            model.gpu_id = None
+
+        if preferred is not None and gpu_assignments.get(preferred) is None:
+            gpu_assignments[preferred] = model_id
+            return preferred
+
+        for gid in range(GPU_COUNT):
+            if gpu_assignments[gid] is None:
+                gpu_assignments[gid] = model_id
+                return gid
+
+        # Evict LRU — pick the GPU with the oldest-used model
+        lru_gid = min(
+            range(GPU_COUNT),
+            key=lambda g: MODELS[gpu_assignments[g]].last_used if gpu_assignments[g] else 0,
+        )
+        old_model_id = gpu_assignments[lru_gid]
+        if old_model_id:
+            old_model = MODELS[old_model_id]
+            logger.info(f"Evicting {old_model_id} from GPU {lru_gid}")
+            _kill_worker(old_model)
+        gpu_assignments[lru_gid] = model_id
+        return lru_gid
+
+
+def _find_shared_worker(model_id: str) -> Optional[ModelInfo]:
+    """If a warm hybrid worker can serve this standalone model, return it."""
+    hybrid_id = SHARED_BY.get(model_id)
+    if not hybrid_id:
+        return None
+    hybrid = MODELS[hybrid_id]
+    if _is_worker_alive(hybrid):
+        logger.info(
+            f"{model_id} → reusing hybrid {hybrid_id} "
+            f"(GPU {hybrid.gpu_id}, port {hybrid.worker_port})"
+        )
+        return hybrid
+    return None
+
+
+def _find_any_serving_worker(model_id: str) -> Optional[tuple[ModelInfo, Optional[list]]]:
+    """Find any live worker that can serve this model.
+
+    Returns (worker, schedule_override) or None.
+    """
     model = MODELS[model_id]
 
-    # Already running on a GPU
-    if model.gpu_id is not None and model.status == ModelStatus.WARM:
-        return model.gpu_id
+    if _is_worker_alive(model):
+        model.last_used = time.time()
+        return model, None
 
-    # Preferred GPU free?
-    if preferred is not None and gpu_assignments.get(preferred) is None:
-        gpu_assignments[preferred] = model_id
-        return preferred
+    shared = _find_shared_worker(model_id)
+    if shared:
+        hybrid_id = shared.id
+        schedule_override = HYBRID_PROVIDERS[hybrid_id][model_id]
+        return shared, schedule_override
 
-    # Any free GPU?
-    for gid in range(GPU_COUNT):
-        if gpu_assignments[gid] is None:
-            gpu_assignments[gid] = model_id
-            return gid
-
-    # Evict LRU
-    lru_gid = min(
-        range(GPU_COUNT),
-        key=lambda g: MODELS[gpu_assignments[g]].last_used if gpu_assignments[g] else 0,
-    )
-    old_model_id = gpu_assignments[lru_gid]
-    if old_model_id:
-        old_model = MODELS[old_model_id]
-        logger.info(f"Evicting {old_model_id} from GPU {lru_gid}")
-        _kill_worker(old_model)
-        old_model.gpu_id = None
-    gpu_assignments[lru_gid] = model_id
-    return lru_gid
+    return None
 
 
 def _ensure_worker(model_id: str) -> ModelInfo:
-    """Ensure the model's worker is running. Start it if needed."""
+    """Ensure a worker is running. Uses per-model lock to prevent duplicate starts."""
     model = MODELS[model_id]
 
-    if model.status == ModelStatus.WARM and model.worker_proc and model.worker_proc.poll() is None:
+    if _is_worker_alive(model):
         model.last_used = time.time()
         return model
 
-    # Need to start the worker
-    gpu_id = _assign_gpu(model_id)
-    ok = _start_worker(model, gpu_id)
-    if not ok:
-        raise RuntimeError(f"Failed to start worker for {model_id}: {model.error_msg}")
-    return model
+    # Per-model lock: if another thread is already starting this model, wait for it
+    with _model_start_locks[model_id]:
+        # Re-check after acquiring lock — another thread may have finished starting it
+        if _is_worker_alive(model):
+            model.last_used = time.time()
+            return model
+
+        gpu_id = _assign_gpu(model_id)
+        ok = _start_worker(model, gpu_id)
+        if not ok:
+            raise RuntimeError(f"Failed to start worker for {model_id}: {model.error_msg}")
+        return model
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +459,16 @@ class Job:
     width: int
     num_frames: int
     seed: int
+    enable_caching: bool = False
+    cache_start_step: Optional[int] = None
+    cache_end_step: Optional[int] = None
+    cache_interval: int = 3
+    gpu_id: Optional[int] = None
     status: str = "queued"
     progress: float = 0.0
     output_path: Optional[str] = None
     error: Optional[str] = None
+    served_by: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
@@ -338,6 +484,44 @@ class Job:
 jobs: dict[str, Job] = {}
 
 
+def _build_payload(job: Job, worker: ModelInfo, schedule_override: Optional[list] = None) -> dict:
+    """Build the request payload for a worker, handling model sharing and caching."""
+    payload: dict = {
+        "prompt": job.prompt,
+        "num_frames": job.num_frames,
+        "seed": job.seed,
+        "output_dir": str(OUTPUTS / job.job_id),
+    }
+
+    is_ltx = job.model_id in _LTX_MODELS or worker.id in _LTX_MODELS
+    is_hybrid = worker.id.startswith("hybrid_")
+
+    if is_ltx:
+        payload["height"] = job.height
+        payload["width"] = job.width
+
+    if schedule_override:
+        payload["schedule"] = schedule_override
+
+    if is_hybrid:
+        if job.enable_caching:
+            payload["cache_start_step"] = job.cache_start_step
+            payload["cache_end_step"] = job.cache_end_step
+            payload["cache_interval"] = job.cache_interval
+            if worker.id.startswith("hybrid_wan"):
+                payload["enable_caching"] = True
+        else:
+            if worker.id.startswith("hybrid_ltx"):
+                payload["cache_start_step"] = None
+                payload["cache_end_step"] = None
+    elif job.enable_caching:
+        payload["cache_start_step"] = job.cache_start_step
+        payload["cache_end_step"] = job.cache_end_step
+        payload["cache_interval"] = job.cache_interval
+
+    return payload
+
+
 def _run_generation(job: Job):
     model = MODELS[job.model_id]
     job.status = "running"
@@ -347,34 +531,40 @@ def _run_generation(job: Job):
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        worker = _ensure_worker(job.model_id)
+        result = _find_any_serving_worker(job.model_id)
+        if result:
+            worker, schedule_override = result
+            job.served_by = worker.id
+            if schedule_override:
+                logger.info(
+                    f"Job {job.job_id}: {job.model_id} → reusing {worker.id} "
+                    f"(no reload, schedule: {schedule_override})"
+                )
+            else:
+                logger.info(f"Job {job.job_id}: {job.model_id} already warm on GPU {worker.gpu_id}")
+            worker.last_used = time.time()
+        else:
+            logger.info(f"Job {job.job_id}: starting fresh worker for {job.model_id}")
+            worker = _ensure_worker(job.model_id)
+            schedule_override = None
+            job.served_by = worker.id
+
         url = f"http://127.0.0.1:{worker.worker_port}/generate"
+        payload = _build_payload(job, worker, schedule_override)
 
-        payload = {
-            "prompt": job.prompt,
-            "num_frames": job.num_frames,
-            "seed": job.seed,
-            "output_dir": str(job_dir),
-        }
-        if job.model_id in ("ltx_2b", "ltx_13b"):
-            payload["height"] = job.height
-            payload["width"] = job.width
-
-        logger.info(f"Sending generate request to {url} for job {job.job_id}")
+        logger.info(f"Job {job.job_id}: POST {url}")
         r = http_requests.post(url, json=payload, timeout=600)
         result = r.json()
 
         if result.get("status") == "success":
             worker_output = result.get("output_path", "")
 
-            # Move/copy the output to our job dir if it's elsewhere
             if worker_output and Path(worker_output).exists():
                 dest = job_dir / "output.mp4"
                 if Path(worker_output) != dest:
                     shutil.copy2(worker_output, dest)
                 job.output_path = f"/outputs/{job.job_id}/output.mp4"
             else:
-                # Search job_dir for any mp4
                 mp4s = sorted(job_dir.glob("**/*.mp4"), key=os.path.getmtime)
                 if mp4s:
                     job.output_path = f"/outputs/{job.job_id}/{mp4s[-1].name}"
@@ -391,14 +581,22 @@ def _run_generation(job: Job):
         job.status = "failed"
         job.error = str(e)[:2000]
         job.completed_at = time.time()
-        model.status = ModelStatus.ERROR
-        model.error_msg = str(e)[:500]
+
+        serving_model = MODELS.get(job.served_by) if job.served_by else model
+        if serving_model and serving_model.worker_proc:
+            if serving_model.worker_proc.poll() is not None:
+                logger.error(f"Worker {serving_model.id} process died")
+                _release_gpu(serving_model)
+                serving_model.status = ModelStatus.ERROR
+                serving_model.error_msg = str(e)[:500]
+            else:
+                logger.info(f"Worker {serving_model.id} still alive after job failure")
 
 
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Arc Fabric", version="0.2.0")
+app = FastAPI(title="Arc Fabric", version="0.4.0")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUTS)), name="outputs")
 
 
@@ -410,18 +608,43 @@ class GenerateRequest(BaseModel):
     num_frames: Optional[int] = None
     seed: int = 42
     gpu_id: Optional[int] = None
+    enable_caching: bool = False
+    cache_start_step: Optional[int] = None
+    cache_end_step: Optional[int] = None
+    cache_interval: int = 3
+
+
+def _model_effective_status(m: ModelInfo) -> tuple[str, Optional[str]]:
+    """Return (effective_status, shared_via) for a model."""
+    if _is_worker_alive(m):
+        return "warm", None
+
+    hybrid_id = SHARED_BY.get(m.id)
+    if hybrid_id:
+        hybrid = MODELS[hybrid_id]
+        if _is_worker_alive(hybrid):
+            return "warm", hybrid_id
+
+    return m.status.value, None
 
 
 @app.get("/api/models")
 async def api_models():
-    return [
-        {
+    result = []
+    for m in MODELS.values():
+        effective_status, shared_via = _model_effective_status(m)
+        effective_gpu = m.gpu_id
+        if shared_via:
+            effective_gpu = MODELS[shared_via].gpu_id
+        result.append({
             "id": m.id,
             "display_name": m.display_name,
             "description": m.description,
-            "status": m.status.value,
-            "gpu_id": m.gpu_id,
+            "status": effective_status,
+            "shared_via": shared_via,
+            "gpu_id": effective_gpu,
             "gpu_memory_gb": m.gpu_memory_gb,
+            "is_hybrid": m.id.startswith("hybrid_"),
             "defaults": {
                 "height": m.default_height,
                 "width": m.default_width,
@@ -429,9 +652,8 @@ async def api_models():
                 "steps": m.default_steps,
                 "fps": m.fps,
             },
-        }
-        for m in MODELS.values()
-    ]
+        })
+    return result
 
 
 @app.get("/api/gpus")
@@ -460,6 +682,11 @@ async def api_generate(req: GenerateRequest, background: BackgroundTasks):
         width=req.width or model.default_width,
         num_frames=req.num_frames or model.default_frames,
         seed=req.seed,
+        enable_caching=req.enable_caching,
+        cache_start_step=req.cache_start_step,
+        cache_end_step=req.cache_end_step,
+        cache_interval=req.cache_interval,
+        gpu_id=req.gpu_id,
     )
     jobs[job.job_id] = job
     background.add_task(_run_generation, job)
@@ -481,6 +708,8 @@ async def api_job(job_id: str):
         "error": job.error,
         "elapsed": job.elapsed,
         "created_at": job.created_at,
+        "served_by": job.served_by,
+        "enable_caching": job.enable_caching,
     }
 
 
@@ -495,6 +724,7 @@ async def api_jobs():
             "output_path": j.output_path,
             "elapsed": j.elapsed,
             "created_at": j.created_at,
+            "served_by": j.served_by,
         }
         for j in sorted(jobs.values(), key=lambda x: x.created_at, reverse=True)
     ]
@@ -505,12 +735,13 @@ async def api_logs(job_id: str):
     log_path = OUTPUTS / job_id / "log.txt"
     if log_path.exists():
         return {"log": log_path.read_text()[-5000:]}
-    # Fall back to worker log
     job = jobs.get(job_id)
     if job:
-        worker_log = OUTPUTS / "_workers" / f"{job.model_id}.log"
-        if worker_log.exists():
-            return {"log": worker_log.read_text()[-5000:]}
+        for worker_id in [job.served_by, job.model_id]:
+            if worker_id:
+                worker_log = OUTPUTS / "_workers" / f"{worker_id}.log"
+                if worker_log.exists():
+                    return {"log": worker_log.read_text()[-5000:]}
     raise HTTPException(404, "Log not found")
 
 
@@ -524,6 +755,13 @@ async def shutdown():
 @app.get("/")
 async def index():
     return FileResponse(str(Path(__file__).parent / "static" / "index.html"))
+
+
+@app.on_event("startup")
+async def startup():
+    _cleanup_stale_workers()
+    logger.info(f"Arc Fabric server starting with {GPU_COUNT} GPUs, "
+                f"worker ports from {WORKER_BASE_PORT}")
 
 
 if __name__ == "__main__":

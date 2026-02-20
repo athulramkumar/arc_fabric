@@ -192,8 +192,8 @@ def _parse_schedule(schedule, total_steps: int):
 
 def _get_inner_pipeline(pipeline):
     """Get the inner LTXVideoPipeline from a potential LTXMultiScalePipeline wrapper."""
-    if hasattr(pipeline, "pipeline"):
-        return pipeline.pipeline
+    if hasattr(pipeline, "video_pipeline"):
+        return pipeline.video_pipeline
     return pipeline
 
 
@@ -216,13 +216,17 @@ def _build_switch_callback(schedule, total_steps: int):
     summary = " → ".join(summary_parts)
 
     def _on_step_end(pipe, step_idx, timestep, callback_kwargs):
+        # `pipe` is the LTXVideoPipeline instance passed by the denoising loop.
+        # Use it directly instead of the closure-captured `inner`, because the
+        # callback may be invoked from a second pass where `pipe` differs.
+        actual = pipe if hasattr(pipe, "transformer") else _get_inner_pipeline(pipe)
         next_step = step_idx + 1
         for start, end, variant in boundaries:
             if next_step == start:
                 target = _transformer_13b if variant == "13b" else _transformer_2b
-                if target is not None and inner.transformer is not target:
+                if target is not None and actual.transformer is not target:
                     logger.info(f"Step {next_step}: switching to {variant.upper()} transformer")
-                    inner.transformer = target
+                    actual.transformer = target
                 break
         return callback_kwargs
 
