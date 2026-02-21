@@ -218,6 +218,81 @@ envs/af-ltx/bin/pip install -r envs/ltx_freeze.txt
 envs/af-ltx/bin/pip install -e models/ltx_video
 ```
 
+### DreamDojo (`envs/af-dreamdojo`)
+
+DreamDojo is an action-conditioned Video2World model. It has its own complex
+dependency tree (Cosmos Predict2, LeRobot, groot_dreams). The environment is
+best created using DreamDojo's own install script.
+
+```bash
+# Clone DreamDojo as a submodule (if not already done)
+cd models/dreamdojo
+
+# Create conda env and install dependencies
+conda create --prefix ../../envs/af-dreamdojo python=3.10 -y
+envs/af-dreamdojo/bin/pip install torch torchvision \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Install DreamDojo and its dependencies
+cd models/dreamdojo
+../../envs/af-dreamdojo/bin/pip install -e .
+../../envs/af-dreamdojo/bin/pip install -e packages/cosmos-oss
+../../envs/af-dreamdojo/bin/pip install -e external/lerobot
+../../envs/af-dreamdojo/bin/pip install -e packages/groot_dreams
+../../envs/af-dreamdojo/bin/pip install fastapi uvicorn lpips
+
+# Install flash attention
+../../envs/af-dreamdojo/bin/pip install flash-attn --no-build-isolation
+cd ../..
+```
+
+#### Download DreamDojo checkpoints
+
+```bash
+# 2B GR-1 post-trained checkpoint
+mkdir -p models/dreamdojo/checkpoints/2B_GR1_post-train/iter_000050000
+huggingface-cli download nvidia/DreamDojo-2B-GR1-Post-Train \
+    model_ema_bf16.pt \
+    --local-dir models/dreamdojo/checkpoints/2B_GR1_post-train/iter_000050000
+
+# 14B GR-1 post-trained checkpoint
+mkdir -p models/dreamdojo/checkpoints/14B_GR1_post-train/iter_000050000
+huggingface-cli download nvidia/DreamDojo-14B-GR1-Post-Train \
+    model_ema_bf16.pt \
+    --local-dir models/dreamdojo/checkpoints/14B_GR1_post-train/iter_000050000
+
+# LAM checkpoint (needed for 14B)
+mkdir -p models/dreamdojo/checkpoints/DreamDojo
+huggingface-cli download nvidia/DreamDojo-LAM \
+    LAM_400k.ckpt \
+    --local-dir models/dreamdojo/checkpoints/DreamDojo
+```
+
+#### Download DreamDojo evaluation dataset
+
+The eval dataset uses GR-1 robot teleoperation data. Only the eval split
+is needed (~10 tasks, a few GB).
+
+```bash
+# Download evaluation tasks (In-lab_Eval only)
+cd models/dreamdojo
+python -c "
+from groot_dreams.scripts.download_eval_data import main
+main()
+"
+cd ../..
+```
+
+This downloads data into `models/dreamdojo/datasets/PhysicalAI-Robotics-GR00T-Teleop-GR1/In-lab_Eval/`.
+
+#### Gated repo workaround
+
+DreamDojo tries to download the Wan 2.1 VAE from a gated HuggingFace repo.
+If you don't have access, the worker automatically falls back to a local copy
+from `~/.hf_home/hub/models--Wan-AI--Wan2.1-T2V-1.3B/`. If you already have
+Wan 2.1 weights downloaded (from the af-wan21 setup), no additional action
+is needed.
+
 ---
 
 ## 4. Install orchestrator dependencies
@@ -236,7 +311,7 @@ envs/af-main/bin/pip install fastapi uvicorn pyyaml requests
 ### Check environments
 
 ```bash
-for env in af-wan21 af-longlive af-ltx; do
+for env in af-wan21 af-longlive af-ltx af-dreamdojo; do
     echo "=== $env ==="
     envs/$env/bin/python -c "import torch; print(f'Python: {__import__(\"sys\").version.split()[0]}  torch: {torch.__version__}  CUDA: {torch.version.cuda}  GPU: {torch.cuda.get_device_name(0)}')"
     echo
@@ -254,12 +329,15 @@ Python: 3.10.x  torch: 2.10.0+cu128  CUDA: 12.8  GPU: NVIDIA H100 80GB HBM3
 
 === af-ltx ===
 Python: 3.10.x  torch: 2.10.0+cu128  CUDA: 12.8  GPU: NVIDIA H100 80GB HBM3
+
+=== af-dreamdojo ===
+Python: 3.10.x  torch: 2.10.0+cu128  CUDA: 12.8  GPU: NVIDIA H100 80GB HBM3
 ```
 
 ### Check flash attention
 
 ```bash
-for env in af-wan21 af-longlive af-ltx; do
+for env in af-wan21 af-longlive af-ltx af-dreamdojo; do
     echo -n "$env: "
     envs/$env/bin/python -c "import flash_attn; print('flash_attn', flash_attn.__version__)" 2>&1
 done
@@ -275,6 +353,13 @@ echo "LTX-Video 2B:  $(ls weights/ltx_video/ltxv-2b-0.9.8-distilled/*.safetensor
 echo "LTX-Video 13B: $(ls weights/ltx_video/ltxv-13b-0.9.8-distilled/*.safetensors 2>/dev/null | wc -l) files"
 ```
 
+```bash
+echo "DreamDojo 2B:  $(ls models/dreamdojo/checkpoints/2B_GR1_post-train/iter_000050000/*.pt 2>/dev/null | wc -l) files"
+echo "DreamDojo 14B: $(ls models/dreamdojo/checkpoints/14B_GR1_post-train/iter_000050000/*.pt 2>/dev/null | wc -l) files"
+echo "DreamDojo LAM: $(ls models/dreamdojo/checkpoints/DreamDojo/*.ckpt 2>/dev/null | wc -l) files"
+echo "DreamDojo Data: $(ls -d models/dreamdojo/datasets/PhysicalAI-Robotics-GR00T-Teleop-GR1/In-lab_Eval/gr1_* 2>/dev/null | wc -l) tasks"
+```
+
 ### Quick smoke test (Wan 2.1)
 
 ```bash
@@ -287,6 +372,25 @@ CUDA_VISIBLE_DEVICES=0 envs/af-wan21/bin/python models/wan21/generate.py \
     --base_seed 42 \
     --prompt "a cat sitting on a windowsill" \
     --save_file outputs/test_wan21.mp4
+```
+
+### Quick smoke test (DreamDojo)
+
+```bash
+# Start the DreamDojo worker standalone (loads model + dataset)
+cd models/dreamdojo && CUDA_VISIBLE_DEVICES=0 \
+    ../../envs/af-dreamdojo/bin/python \
+    ../../workers/dreamdojo_worker.py --port 9110 --model-name dreamdojo_2b &
+# Wait ~90s for model and dataset to load, then:
+curl -s http://localhost:9110/health
+# Expected: {"status":"ready","model":"dreamdojo_2b","samples":100}
+
+# Test generation
+curl -s -X POST http://localhost:9110/generate \
+    -H 'Content-Type: application/json' \
+    -d '{"sample_id": "gr1_unified.mug_robot_0", "output_dir": "/tmp/dd_test", "seed": 42}'
+# Expected: {"status":"success","metrics":{"psnr":...,"ssim":...,"lpips":...},...}
+cd ../..
 ```
 
 ### Quick smoke test (LTX-Video)
@@ -326,6 +430,7 @@ arc_fabric/
 │   ├── af-wan21/
 │   ├── af-longlive/
 │   ├── af-ltx/
+│   ├── af-dreamdojo/
 │   ├── wan21_freeze.txt     # pip freeze snapshots
 │   ├── longlive_freeze.txt
 │   └── ltx_freeze.txt
@@ -333,6 +438,7 @@ arc_fabric/
 │   ├── wan21/
 │   ├── longlive/
 │   ├── ltx_video/
+│   ├── dreamdojo/           # DreamDojo (checkpoints + datasets inside)
 │   └── inferix/
 ├── weights/                 # Downloaded model weights
 │   ├── wan21/
@@ -343,7 +449,8 @@ arc_fabric/
 │   ├── hybrid_wan21_worker.py
 │   ├── longlive_worker.py
 │   ├── ltx_worker.py
-│   └── hybrid_ltx_worker.py
+│   ├── hybrid_ltx_worker.py
+│   └── dreamdojo_worker.py
 ├── outputs/                 # Generated videos
 └── docs/
     ├── ARCHITECTURE.md
@@ -365,6 +472,7 @@ CUDA toolkit.
 envs/af-wan21/bin/pip install flash-attn --no-build-isolation
 envs/af-longlive/bin/pip install flash-attn --no-build-isolation
 envs/af-ltx/bin/pip install flash-attn --no-build-isolation
+envs/af-dreamdojo/bin/pip install flash-attn --no-build-isolation
 ```
 
 ### CUDA version mismatch workaround
@@ -395,7 +503,7 @@ for d in lib64 include targets; do
 done
 
 # Build with the compat wrapper
-for env in af-wan21 af-longlive af-ltx; do
+for env in af-wan21 af-longlive af-ltx af-dreamdojo; do
     CUDA_HOME=/tmp/cuda_compat PATH=/tmp/cuda_compat/bin:$PATH \
         MAX_JOBS=4 envs/$env/bin/pip install flash-attn --no-build-isolation
 done
@@ -436,6 +544,8 @@ Each model's approximate VRAM usage:
 | LTX-Video 2B | ~26 GB |
 | LTX-Video 13B | ~50 GB |
 | LTX-Video Hybrid (13B+2B) | ~52 GB |
+| DreamDojo 2B GR-1 | ~34 GB |
+| DreamDojo 14B GR-1 | ~70 GB |
 
 With 2× H100 (80 GB each), you can run any two models simultaneously
 on separate GPUs. The orchestrator handles LRU eviction automatically.

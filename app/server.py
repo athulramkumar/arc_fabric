@@ -168,6 +168,27 @@ MODELS: dict[str, ModelInfo] = {
         default_frames=97, default_steps=10, fps=24,
         worker_script=str(ROOT / "workers" / "hybrid_ltx_worker.py"),
     ),
+    # ── DreamDojo (Video2World) ──
+    "dreamdojo_2b": ModelInfo(
+        id="dreamdojo_2b",
+        display_name="DreamDojo — 2B GR-1",
+        description="Action-conditioned Video2World: predicts future video from initial frame + robot actions. Fast 2B variant.",
+        conda_env=str(ROOT / "envs" / "af-dreamdojo"),
+        gpu_memory_gb=58.0,
+        default_height=480, default_width=640,
+        default_frames=49, default_steps=35, fps=10,
+        worker_script=str(ROOT / "workers" / "dreamdojo_worker.py"),
+    ),
+    "dreamdojo_14b": ModelInfo(
+        id="dreamdojo_14b",
+        display_name="DreamDojo — 14B GR-1",
+        description="Action-conditioned Video2World: 14B variant with higher quality predictions. Slower but more accurate.",
+        conda_env=str(ROOT / "envs" / "af-dreamdojo"),
+        gpu_memory_gb=70.0,
+        default_height=480, default_width=640,
+        default_frames=49, default_steps=35, fps=10,
+        worker_script=str(ROOT / "workers" / "dreamdojo_worker.py"),
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -190,6 +211,7 @@ for _hybrid_id, _subs in HYBRID_PROVIDERS.items():
         SHARED_BY[_sub_id] = _hybrid_id
 
 _LTX_MODELS = {"ltx_2b", "ltx_2b_dev", "ltx_13b", "ltx_13b_dev", "hybrid_ltx"}
+_DREAMDOJO_MODELS = {"dreamdojo_2b", "dreamdojo_14b"}
 
 gpu_assignments: dict[int, Optional[str]] = {i: None for i in range(GPU_COUNT)}
 _next_port = WORKER_BASE_PORT
@@ -472,6 +494,11 @@ class Job:
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
+    sample_id: Optional[str] = None
+    gt_path: Optional[str] = None
+    merged_path: Optional[str] = None
+    actions_path: Optional[str] = None
+    metrics: Optional[dict] = None
 
     @property
     def elapsed(self) -> Optional[float]:
@@ -486,6 +513,17 @@ jobs: dict[str, Job] = {}
 
 def _build_payload(job: Job, worker: ModelInfo, schedule_override: Optional[list] = None) -> dict:
     """Build the request payload for a worker, handling model sharing and caching."""
+    is_dreamdojo = job.model_id in _DREAMDOJO_MODELS
+
+    if is_dreamdojo:
+        return {
+            "sample_id": job.sample_id,
+            "output_dir": str(OUTPUTS / job.job_id),
+            "num_frames": job.num_frames,
+            "seed": job.seed,
+            "prompt": job.prompt or "",
+        }
+
     payload: dict = {
         "prompt": job.prompt,
         "num_frames": job.num_frames,
@@ -559,7 +597,16 @@ def _run_generation(job: Job):
         if result.get("status") == "success":
             worker_output = result.get("output_path", "")
 
-            if worker_output and Path(worker_output).exists():
+            if job.model_id in _DREAMDOJO_MODELS:
+                for key in ("gt_path", "merged_path", "actions_path"):
+                    val = result.get(key, "")
+                    if val and Path(val).exists():
+                        setattr(job, key, f"/outputs/{job.job_id}/{Path(val).name}")
+                job.metrics = result.get("metrics")
+                pred_p = result.get("pred_path", "")
+                if pred_p and Path(pred_p).exists():
+                    job.output_path = f"/outputs/{job.job_id}/{Path(pred_p).name}"
+            elif worker_output and Path(worker_output).exists():
                 dest = job_dir / "output.mp4"
                 if Path(worker_output) != dest:
                     shutil.copy2(worker_output, dest)
@@ -602,7 +649,7 @@ app.mount("/outputs", StaticFiles(directory=str(OUTPUTS)), name="outputs")
 
 class GenerateRequest(BaseModel):
     model_id: str
-    prompt: str
+    prompt: str = ""
     height: Optional[int] = None
     width: Optional[int] = None
     num_frames: Optional[int] = None
@@ -612,6 +659,7 @@ class GenerateRequest(BaseModel):
     cache_start_step: Optional[int] = None
     cache_end_step: Optional[int] = None
     cache_interval: int = 3
+    sample_id: Optional[str] = None
 
 
 def _model_effective_status(m: ModelInfo) -> tuple[str, Optional[str]]:
@@ -677,7 +725,7 @@ async def api_generate(req: GenerateRequest, background: BackgroundTasks):
     job = Job(
         job_id=str(uuid.uuid4())[:8],
         model_id=req.model_id,
-        prompt=req.prompt,
+        prompt=req.prompt or "",
         height=req.height or model.default_height,
         width=req.width or model.default_width,
         num_frames=req.num_frames or model.default_frames,
@@ -687,6 +735,7 @@ async def api_generate(req: GenerateRequest, background: BackgroundTasks):
         cache_end_step=req.cache_end_step,
         cache_interval=req.cache_interval,
         gpu_id=req.gpu_id,
+        sample_id=req.sample_id,
     )
     jobs[job.job_id] = job
     background.add_task(_run_generation, job)
@@ -710,6 +759,11 @@ async def api_job(job_id: str):
         "created_at": job.created_at,
         "served_by": job.served_by,
         "enable_caching": job.enable_caching,
+        "gt_path": job.gt_path,
+        "merged_path": job.merged_path,
+        "actions_path": job.actions_path,
+        "metrics": job.metrics,
+        "sample_id": job.sample_id,
     }
 
 
@@ -743,6 +797,25 @@ async def api_logs(job_id: str):
                 if worker_log.exists():
                     return {"log": worker_log.read_text()[-5000:]}
     raise HTTPException(404, "Log not found")
+
+
+# ---------------------------------------------------------------------------
+# DreamDojo — fetch available dataset samples from the running worker
+# ---------------------------------------------------------------------------
+
+@app.get("/api/dreamdojo/samples")
+async def dreamdojo_samples():
+    """Get available dataset samples from a running DreamDojo worker."""
+    for mid in _DREAMDOJO_MODELS:
+        m = MODELS[mid]
+        if _is_worker_alive(m):
+            try:
+                r = http_requests.get(f"http://127.0.0.1:{m.worker_port}/samples", timeout=10)
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                pass
+    return {"samples": [], "message": "No DreamDojo worker running. Start a generation to load samples."}
 
 
 # ---------------------------------------------------------------------------

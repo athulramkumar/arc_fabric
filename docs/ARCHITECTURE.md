@@ -22,6 +22,8 @@ without full regeneration.
 | Wan 2.1 1.3B | WORKING | af-wan21 (envs/af-wan21) | 17GB | 832x480, 33 frames, ~77s |
 | LongLive 1.3B | WORKING | af-longlive (envs/af-longlive) | 17GB base + 8.2GB LongLive | 832x480, 30 frames, ~74s |
 | LTX-Video 2B | WORKING | af-ltx (envs/af-ltx) | 26GB (2B) + 27GB (13B) | 704x480, 97 frames, ~18s |
+| DreamDojo 2B GR-1 | WORKING | af-dreamdojo (envs/af-dreamdojo) | ~34GB VRAM | 640x480, 49 frames, ~42s |
+| DreamDojo 14B GR-1 | WORKING | af-dreamdojo (envs/af-dreamdojo) | ~70GB VRAM | 640x480, 49 frames, ~104s |
 | Inferix | REFERENCE | -- | -- | -- |
 
 ### Platform Components Built
@@ -35,6 +37,7 @@ without full regeneration.
 - `arc_fabric/api/server.py` - FastAPI orchestrator (routes requests to workers)
 - `workers/longlive_worker.py` - LongLive FastAPI worker
 - `workers/ltx_worker.py` - LTX-Video FastAPI worker
+- `workers/dreamdojo_worker.py` - DreamDojo FastAPI worker (action-conditioned Video2World)
 - `tests/test_gpu_manager.py` - GPU manager unit tests (passing)
 - `tests/test_video_quality.py` - CLIP-based quality validation (passing)
 
@@ -62,14 +65,14 @@ without full regeneration.
                              │               │
               ┌──────────────┼───────────────┼──────────────┐
               ▼              ▼               ▼              ▼
-     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-     │ Wan 2.1 1.3B │ │  LongLive    │ │  LTX-Video   │
-     │ (af-wan21)   │ │ (af-longlive)│ │  (af-ltx)    │
-     │ GPU: 0 or 1  │ │ GPU: 0 or 1  │ │  GPU: 0 or 1 │
-     │              │ │              │ │              │
-     │ generate.py  │ │ pipeline.    │ │  ltx_video.  │
-     │ CLI          │ │ inference()  │ │  inference() │
-     └──────────────┘ └──────────────┘ └──────────────┘
+     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+     │ Wan 2.1 1.3B │ │  LongLive    │ │  LTX-Video   │ │  DreamDojo   │
+     │ (af-wan21)   │ │ (af-longlive)│ │  (af-ltx)    │ │(af-dreamdojo)│
+     │ GPU: 0 or 1  │ │ GPU: 0 or 1  │ │  GPU: 0 or 1 │ │ GPU: 0 or 1  │
+     │              │ │              │ │              │ │              │
+     │ generate.py  │ │ pipeline.    │ │  ltx_video.  │ │ vid2world    │
+     │ CLI          │ │ inference()  │ │  inference() │ │ inference()  │
+     └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
 ```
 
 ## Key Design Decisions
@@ -120,6 +123,18 @@ When moving to a new machine, the envs directory carries all dependencies.
 - Needs local config with absolute paths (stock config uses relative/HF paths)
 - ~26GB GPU memory, ~18s generation for 97 frames at 704x480
 
+### DreamDojo (2B & 14B)
+- Action-conditioned Video2World model (NOT text-to-video)
+- Takes initial frame + 7D robot actions → predicts future video
+- Built on Cosmos Predict2 (Wan 2.1 architecture) with action cross-attention
+- 12-frame chunk autoregressive generation, 480×640 resolution
+- Worker: `workers/dreamdojo_worker.py`, serves `/health`, `/samples`, `/generate`
+- UI: custom sidebar with dataset sample dropdown, synced GT vs predicted video playback, action norms chart, quality metrics (PSNR, SSIM, LPIPS)
+- Dataset: nvidia/PhysicalAI-Robotics-GR00T-Teleop-GR1 (10 eval tasks, 100 samples)
+- 14B variant uses LAM (Latent Action Model) for additional conditioning
+- Checkpoints stored in `models/dreamdojo/checkpoints/`
+- Detailed setup: `models/dreamdojo/docs/ONBOARDING.md`
+
 ### Inferix (reference)
 - Block-diffusion inference engine for semi-AR models
 - Patterns to adopt: KV cache management, block-level state, streaming decode
@@ -136,6 +151,7 @@ When moving to a new machine, the envs directory carries all dependencies.
 │   ├── wan21/                  # Wan 2.1 (with hybrid schedule notebooks)
 │   ├── longlive/               # LongLive (interactive video)
 │   ├── ltx_video/              # LTX-Video (fast DiT)
+│   ├── dreamdojo/              # DreamDojo (action-conditioned Video2World)
 │   └── inferix/                # Inferix (reference patterns)
 ├── weights/                    # ~140GB total
 │   ├── wan21/                  # 1.3B (17GB) + 14B (65GB)
@@ -146,7 +162,8 @@ When moving to a new machine, the envs directory carries all dependencies.
 ├── envs/                       # Portable conda environments
 │   ├── af-wan21/
 │   ├── af-longlive/
-│   └── af-ltx/
+│   ├── af-ltx/
+│   └── af-dreamdojo/
 ├── workers/                    # Model worker FastAPI servers (standalone)
 ├── arc_fabric/                 # Core platform code
 │   ├── config.py
@@ -175,3 +192,5 @@ python3 app/server.py
 3. Integrate Inferix KV cache patterns into LongLive worker
 4. Add session state persistence (resume/fork sessions)
 5. Streaming output support (progressive frames via WebSocket)
+6. DreamDojo distillation pipeline (real-time 10 FPS generation)
+7. DreamDojo multi-embodiment support (G1, AgileBot, EgoDex)

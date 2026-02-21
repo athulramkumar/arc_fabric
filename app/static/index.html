@@ -159,7 +159,31 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 .ix-review-btn.accept{background:var(--accent);color:#fff}
 .ix-review-btn.regen{background:var(--surface3);color:var(--text2)}
 
-@media(max-width:600px){.main{flex-direction:column}.sidebar{max-width:none;min-width:0;border-right:none;border-bottom:1px solid var(--border)}.ix-video-grid{grid-template-columns:1fr}}
+/* DreamDojo */
+.dd-select{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit;outline:none;cursor:pointer;transition:border .12s;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.dd-select:focus{border-color:var(--accent)}
+.dd-select option{background:var(--surface);color:var(--text)}
+.dd-metrics{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px}
+.dd-metric{text-align:center;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:8px}
+.dd-metric .val{font-size:18px;font-weight:700;color:var(--accent2);font-variant-numeric:tabular-nums}
+.dd-metric .lbl{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);margin-top:2px}
+.dd-video-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.dd-video-col{display:flex;flex-direction:column;gap:6px}
+.dd-video-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3)}
+.dd-video-box{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center}
+.dd-video-box video{width:100%;height:100%;object-fit:contain;display:block}
+.dd-video-box .placeholder{text-align:center;color:var(--text3);font-size:12px}
+.dd-sync-bar{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px}
+.dd-sync-bar button{padding:6px 14px;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:var(--accent);color:#fff;transition:opacity .12s}
+.dd-sync-bar button:hover{opacity:.85}
+.dd-sync-bar .dd-time{font-size:12px;font-weight:600;color:var(--text2);font-variant-numeric:tabular-nums;min-width:100px;white-space:nowrap;text-align:right}
+.dd-sync-bar input[type=range]{flex:1;accent-color:var(--accent)}
+.dd-chart-container{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px;min-height:180px}
+.dd-chart-container canvas{width:100%!important;height:160px!important}
+.dd-task-label{font-size:12px;font-weight:600;color:var(--text);margin-bottom:2px}
+.dd-task-detail{font-size:10px;color:var(--text3)}
+
+@media(max-width:600px){.main{flex-direction:column}.sidebar{max-width:none;min-width:0;border-right:none;border-bottom:1px solid var(--border)}.ix-video-grid{grid-template-columns:1fr}.dd-video-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -202,6 +226,38 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
         <div class="section">
           <button class="gen-btn" id="genBtn" onclick="generate()">Generate Video</button>
           <div class="active-jobs" id="activeJobs"></div>
+        </div>
+      </div>
+      <div id="dreamdojoSidebar" style="display:none">
+        <div class="section">
+          <div class="section-title">DreamDojo — Action-Conditioned Prediction</div>
+          <div class="param-group full" style="margin-bottom:8px">
+            <label>Dataset Sample</label>
+            <select class="dd-select" id="ddSampleSelect">
+              <option value="">Loading samples...</option>
+            </select>
+          </div>
+          <div id="ddSampleInfo" style="margin-bottom:8px"></div>
+          <div class="param-grid">
+            <div class="param-group"><label>Seed</label><input type="number" id="ddSeed" value="42"></div>
+            <div class="param-group"><label>Frames</label><input type="number" id="ddFrames" value="49"></div>
+          </div>
+          <button class="gen-btn" id="ddGenBtn" onclick="ddGenerate()">Predict Video</button>
+          <div class="active-jobs" id="ddActiveJobs"></div>
+        </div>
+        <div class="section" id="ddMetricsSection" style="display:none">
+          <div class="section-title">Quality Metrics</div>
+          <div class="dd-metrics">
+            <div class="dd-metric"><div class="val" id="ddPsnr">—</div><div class="lbl">PSNR</div></div>
+            <div class="dd-metric"><div class="val" id="ddSsim">—</div><div class="lbl">SSIM</div></div>
+            <div class="dd-metric"><div class="val" id="ddLpips">—</div><div class="lbl">LPIPS</div></div>
+          </div>
+        </div>
+        <div class="section" id="ddLogSection" style="display:none">
+          <div class="section-title">Worker Log</div>
+          <div class="log-box" style="max-height:120px">
+            <div class="log-content" id="ddLogContent" style="font-size:10px"></div>
+          </div>
         </div>
       </div>
       <div id="interactiveSidebar" style="display:none">
@@ -284,6 +340,44 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
           <div class="history-grid" id="historyGrid"><div class="empty">No videos generated yet</div></div>
         </div>
       </div>
+      <div class="output-inner" id="dreamdojoOutput" style="display:none">
+        <div class="dd-video-grid">
+          <div class="dd-video-col">
+            <div class="dd-video-label">Ground Truth</div>
+            <div class="dd-video-box" id="ddGtBox">
+              <div class="placeholder">Select a sample and click Predict</div>
+            </div>
+          </div>
+          <div class="dd-video-col">
+            <div class="dd-video-label">Model Prediction</div>
+            <div class="dd-video-box" id="ddPredBox">
+              <div class="placeholder">Predicted video will appear here</div>
+            </div>
+          </div>
+        </div>
+        <div class="dd-sync-bar" id="ddSyncBar" style="display:none">
+          <button onclick="ddTogglePlay()" id="ddPlayBtn">Play</button>
+          <input type="range" id="ddScrubber" min="0" max="100" value="0" step="0.1" oninput="ddScrub(this.value)">
+          <div class="dd-time" id="ddTimeLabel">0.0s / 0.0s</div>
+        </div>
+        <div class="meta-row" id="ddJobMeta"></div>
+        <div id="ddChartSection" style="display:none">
+          <div class="dd-video-label" style="margin-bottom:6px">Action Norms Over Time</div>
+          <div class="dd-chart-container">
+            <canvas id="ddActionChart"></canvas>
+          </div>
+        </div>
+        <div id="ddMergedSection" style="display:none">
+          <div class="dd-video-label" style="margin-bottom:6px">Side-by-Side Merged Video</div>
+          <div class="video-box" id="ddMergedBox">
+            <div class="placeholder">Merged video will appear here</div>
+          </div>
+        </div>
+        <div class="log-box" id="ddOutputLogBox" style="display:none">
+          <div class="log-header"><span>Worker Log</span></div>
+          <div class="log-content" id="ddOutputLogContent"></div>
+        </div>
+      </div>
       <div class="output-inner" id="interactiveOutput" style="display:none">
         <div class="ix-video-grid">
           <div>
@@ -334,8 +428,11 @@ function getFamily(id) {
   if (id.startsWith('wan21') || id.startsWith('hybrid_wan')) return 'Wan 2.1';
   if (id.startsWith('longlive')) return 'LongLive';
   if (id.startsWith('ltx') || id.startsWith('hybrid_ltx')) return 'LTX-Video';
+  if (id.startsWith('dreamdojo')) return 'DreamDojo';
   return 'Other';
 }
+
+function isDreamDojo(id) { return id && id.startsWith('dreamdojo'); }
 
 function isHybridModel(id) {
   if (!id) return false;
@@ -394,12 +491,16 @@ function selectModel(id) {
     cacheSection.classList.remove('visible');
   }
 
-  // Toggle interactive mode
+  // Toggle panels based on model type
   const isIx = (id === 'longlive_interactive');
-  $('#standardSidebar').style.display = isIx ? 'none' : '';
+  const isDD = isDreamDojo(id);
+  $('#standardSidebar').style.display = (isIx || isDD) ? 'none' : '';
   $('#interactiveSidebar').style.display = isIx ? '' : 'none';
-  $('#standardOutput').style.display = isIx ? 'none' : '';
+  $('#dreamdojoSidebar').style.display = isDD ? '' : 'none';
+  $('#standardOutput').style.display = (isIx || isDD) ? 'none' : '';
   $('#interactiveOutput').style.display = isIx ? '' : 'none';
+  $('#dreamdojoOutput').style.display = isDD ? '' : 'none';
+  if (isDD) ddLoadSamples();
 }
 
 function toggleCacheParams() {
@@ -1071,6 +1172,385 @@ async function ixReset() {
     ixSetStatus(`Reset failed: ${e.message || e}`);
   }
   ixBusy = false;
+}
+
+// ---------------------------------------------------------------------------
+// DreamDojo — action-conditioned Video2World
+// ---------------------------------------------------------------------------
+let ddSamples = [];
+let ddViewingJob = null;
+let ddPlaying = false;
+let ddSyncInterval = null;
+let ddActionData = null;
+let ddChart = null;
+
+async function ddLoadSamples() {
+  try {
+    const data = await fetchJSON('/api/dreamdojo/samples');
+    ddSamples = data.samples || [];
+    const sel = $('#ddSampleSelect');
+    if (!ddSamples.length) {
+      sel.innerHTML = '<option value="">No samples — model loads on first generation</option>';
+      return;
+    }
+    const tasks = {};
+    ddSamples.forEach(s => {
+      if (!tasks[s.task]) tasks[s.task] = [];
+      tasks[s.task].push(s);
+    });
+    let html = '<option value="">Select a sample...</option>';
+    for (const [task, samples] of Object.entries(tasks)) {
+      const display = samples[0].task_display || task;
+      html += `<optgroup label="${display}">`;
+      samples.forEach(s => {
+        html += `<option value="${s.id}">${s.label}</option>`;
+      });
+      html += '</optgroup>';
+    }
+    sel.innerHTML = html;
+  } catch (e) {
+    console.warn('Failed to load DreamDojo samples:', e);
+  }
+}
+
+async function ddGenerate() {
+  if (!selectedModel || !isDreamDojo(selectedModel)) return;
+
+  const sampleId = $('#ddSampleSelect').value;
+  if (!sampleId) {
+    alert('Please select a dataset sample first.');
+    return;
+  }
+
+  const body = {
+    model_id: selectedModel,
+    sample_id: sampleId,
+    seed: +$('#ddSeed').value || 42,
+    num_frames: +$('#ddFrames').value || 49,
+  };
+
+  const btn = $('#ddGenBtn');
+  btn.disabled = true;
+  btn.textContent = 'Loading model...';
+
+  const data = await fetchJSON('/api/generate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+
+  const jobId = data.job_id;
+  ddViewingJob = jobId;
+  activeJobs.set(jobId, { startTime: Date.now(), modelId: selectedModel, prompt: sampleId });
+
+  // Show overlay on pred box
+  ddShowOverlay('ddPredBox', 'Loading model & generating...');
+  ddStartTimer(activeJobs.get(jobId).startTime);
+
+  ddPollJob(jobId);
+  loadModels(); loadGPUs();
+}
+
+function ddShowOverlay(boxId, text) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const ph = box.querySelector('.placeholder');
+  if (ph) ph.style.display = 'none';
+  let ov = box.querySelector('.overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.className = 'overlay';
+    box.appendChild(ov);
+  }
+  ov.innerHTML = `<div class="spinner"></div><div class="label">${text}</div><div class="timer" id="ddTimer">0.0s</div>`;
+  ov.style.display = 'flex';
+}
+
+function ddHideOverlay(boxId) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const ov = box.querySelector('.overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+let _ddTimerInterval = null;
+function ddStartTimer(startTime) {
+  if (_ddTimerInterval) clearInterval(_ddTimerInterval);
+  _ddTimerInterval = setInterval(() => {
+    const el = document.getElementById('ddTimer');
+    if (el) el.textContent = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+  }, 100);
+}
+
+function ddStopTimer() {
+  if (_ddTimerInterval) { clearInterval(_ddTimerInterval); _ddTimerInterval = null; }
+}
+
+async function ddPollJob(jobId) {
+  const job = await fetchJSON(`/api/jobs/${jobId}`);
+
+  if (ddViewingJob === jobId) {
+    const ov = document.querySelector('#ddPredBox .overlay');
+    if (ov && ov.style.display !== 'none') {
+      const label = ov.querySelector('.label');
+      if (job.status === 'running') label.textContent = 'Generating prediction...';
+      else if (job.status === 'queued') label.textContent = 'Queued — loading model...';
+    }
+    // Poll logs
+    try {
+      const logData = await fetchJSON(`/api/logs/${jobId}`);
+      if (logData.log) {
+        const el = $('#ddOutputLogContent');
+        if (el) { el.textContent = logData.log; el.parentElement.scrollTop = el.parentElement.scrollHeight; }
+        $('#ddOutputLogBox').style.display = 'block';
+      }
+    } catch(e) {}
+  }
+
+  if (job.status === 'completed') {
+    activeJobs.delete(jobId);
+    if (ddViewingJob === jobId) {
+      ddStopTimer();
+      ddHideOverlay('ddPredBox');
+      ddShowResult(job);
+    }
+    const btn = $('#ddGenBtn');
+    btn.disabled = false;
+    btn.textContent = 'Predict Video';
+    loadModels(); loadGPUs();
+    ddLoadSamples();
+    return;
+  }
+  if (job.status === 'failed') {
+    activeJobs.delete(jobId);
+    if (ddViewingJob === jobId) {
+      ddStopTimer();
+      ddShowOverlay('ddPredBox', 'Generation failed: ' + (job.error || '').substring(0, 200));
+    }
+    const btn = $('#ddGenBtn');
+    btn.disabled = false;
+    btn.textContent = 'Predict Video';
+    loadModels(); loadGPUs();
+    return;
+  }
+
+  setTimeout(() => ddPollJob(jobId), 3000);
+}
+
+function ddShowVideo(boxId, url) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const ph = box.querySelector('.placeholder');
+  if (ph) ph.style.display = 'none';
+  const ov = box.querySelector('.overlay');
+  if (ov) ov.style.display = 'none';
+  let v = box.querySelector('video');
+  if (!v) {
+    v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'auto';
+    box.appendChild(v);
+  }
+  v.src = url + '?t=' + Date.now();
+  v.style.display = 'block';
+  return v;
+}
+
+function ddShowResult(job) {
+  // GT video
+  if (job.gt_path) ddShowVideo('ddGtBox', job.gt_path);
+
+  // Pred video
+  if (job.output_path) ddShowVideo('ddPredBox', job.output_path);
+
+  // Sync bar
+  $('#ddSyncBar').style.display = 'flex';
+
+  // Merged
+  if (job.merged_path) {
+    $('#ddMergedSection').style.display = '';
+    const mv = ddShowVideo('ddMergedBox', job.merged_path);
+    if (mv) { mv.controls = true; mv.loop = true; }
+  }
+
+  // Metrics
+  if (job.metrics) {
+    $('#ddMetricsSection').style.display = '';
+    $('#ddPsnr').textContent = job.metrics.psnr?.toFixed(2) || '—';
+    $('#ddSsim').textContent = job.metrics.ssim?.toFixed(3) || '—';
+    $('#ddLpips').textContent = job.metrics.lpips?.toFixed(3) || '—';
+  }
+
+  // Meta
+  const m = modelsData.find(x => x.id === job.model_id);
+  const elapsed = job.elapsed ? job.elapsed.toFixed(1) + 's' : '—';
+  $('#ddJobMeta').innerHTML = `
+    <span>Model: <strong>${m ? m.display_name : job.model_id}</strong></span>
+    <span>Time: <strong>${elapsed}</strong></span>
+    <span>Sample: <strong>${job.sample_id || '—'}</strong></span>
+  `;
+
+  // Load action data and render chart
+  if (job.actions_path) ddLoadActions(job.actions_path);
+
+  // Setup sync playback
+  setTimeout(ddSetupSync, 500);
+}
+
+function ddSetupSync() {
+  const gtVid = document.querySelector('#ddGtBox video');
+  const predVid = document.querySelector('#ddPredBox video');
+  if (!gtVid || !predVid) return;
+
+  gtVid.pause();
+  predVid.pause();
+  gtVid.currentTime = 0;
+  predVid.currentTime = 0;
+  ddPlaying = false;
+  $('#ddPlayBtn').textContent = 'Play';
+
+  const updateScrubber = () => {
+    const dur = gtVid.duration || 1;
+    const pct = (gtVid.currentTime / dur) * 100;
+    $('#ddScrubber').value = pct;
+    $('#ddTimeLabel').textContent = `${gtVid.currentTime.toFixed(1)}s / ${dur.toFixed(1)}s`;
+    ddHighlightTimestep(gtVid.currentTime, dur);
+  };
+
+  gtVid.removeEventListener('timeupdate', updateScrubber);
+  gtVid.addEventListener('timeupdate', updateScrubber);
+
+  gtVid.addEventListener('ended', () => {
+    predVid.currentTime = 0;
+    gtVid.currentTime = 0;
+    if (ddPlaying) {
+      gtVid.play();
+      predVid.play();
+    }
+  });
+}
+
+function ddTogglePlay() {
+  const gtVid = document.querySelector('#ddGtBox video');
+  const predVid = document.querySelector('#ddPredBox video');
+  if (!gtVid || !predVid) return;
+
+  if (ddPlaying) {
+    gtVid.pause();
+    predVid.pause();
+    ddPlaying = false;
+    $('#ddPlayBtn').textContent = 'Play';
+  } else {
+    predVid.currentTime = gtVid.currentTime;
+    gtVid.play();
+    predVid.play();
+    ddPlaying = true;
+    $('#ddPlayBtn').textContent = 'Pause';
+  }
+}
+
+function ddScrub(val) {
+  const gtVid = document.querySelector('#ddGtBox video');
+  const predVid = document.querySelector('#ddPredBox video');
+  if (!gtVid || !predVid) return;
+  const dur = gtVid.duration || 1;
+  const t = (val / 100) * dur;
+  gtVid.currentTime = t;
+  predVid.currentTime = t;
+  $('#ddTimeLabel').textContent = `${t.toFixed(1)}s / ${dur.toFixed(1)}s`;
+  ddHighlightTimestep(t, dur);
+}
+
+async function ddLoadActions(actionsPath) {
+  try {
+    const data = await fetchJSON(actionsPath);
+    ddActionData = data;
+    $('#ddChartSection').style.display = '';
+    ddDrawChart(data);
+  } catch (e) {
+    console.warn('Failed to load actions:', e);
+  }
+}
+
+function ddDrawChart(data) {
+  const canvas = document.getElementById('ddActionChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width - 32;
+  canvas.height = 160;
+  const W = canvas.width, H = canvas.height;
+  const pad = {top: 10, right: 10, bottom: 25, left: 45};
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const groups = data.groups || [];
+  const labels = data.group_labels || [];
+  if (!groups.length) return;
+
+  const T = groups[0].length;
+  const allVals = groups.flat();
+  let maxVal = Math.max(...allVals, 0.1);
+
+  const colors = ['#7c3aed','#3b82f6','#22c55e','#f59e0b','#ef4444','#ec4899','#06b6d4','#84cc16'];
+
+  // Grid
+  ctx.strokeStyle = '#27272a';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (plotH / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+  }
+
+  // Lines
+  groups.forEach((g, gi) => {
+    ctx.strokeStyle = colors[gi % colors.length];
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    g.forEach((v, t) => {
+      const x = pad.left + (t / Math.max(T - 1, 1)) * plotW;
+      const y = pad.top + plotH - (v / maxVal) * plotH;
+      t === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+
+  // Axes labels
+  ctx.fillStyle = '#71717a';
+  ctx.font = '9px Inter, sans-serif';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (plotH / 4) * i;
+    const val = maxVal * (1 - i / 4);
+    ctx.fillText(val.toFixed(1), pad.left - 5, y + 3);
+  }
+  ctx.textAlign = 'center';
+  for (let i = 0; i <= 4; i++) {
+    const x = pad.left + (plotW / 4) * i;
+    const t = Math.round((T / 4) * i);
+    ctx.fillText(t, x, H - 5);
+  }
+
+  // Timestamp marker line (hidden initially)
+  ddChart = { canvas, ctx, data, groups, T, maxVal, W, H, pad, plotW, plotH, colors };
+}
+
+function ddHighlightTimestep(currentTime, duration) {
+  if (!ddChart || !ddActionData) return;
+  const { canvas, data, groups, T, maxVal, W, H, pad, plotW, plotH, colors } = ddChart;
+  const ctx = canvas.getContext('2d');
+  ddDrawChart(data);
+  const t = Math.floor((currentTime / Math.max(duration, 0.01)) * (T - 1));
+  const x = pad.left + (t / Math.max(T - 1, 1)) * plotW;
+  ctx.strokeStyle = '#fafafa';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, H - pad.bottom); ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 // Update button text when skip_ai changes

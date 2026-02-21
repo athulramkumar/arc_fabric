@@ -16,7 +16,8 @@
 │   └── api/server.py              #   Orchestrator API (routes to workers)
 ├── workers/                       # Standalone model workers
 │   ├── longlive_worker.py         #   LongLive FastAPI worker
-│   └── ltx_worker.py              #   LTX-Video FastAPI worker
+│   ├── ltx_worker.py              #   LTX-Video FastAPI worker
+│   └── dreamdojo_worker.py        #   DreamDojo (action-conditioned Video2World)
 ├── tests/                         # Test suite
 │   ├── test_gpu_manager.py        #   GPU manager unit tests
 │   ├── test_video_quality.py      #   CLIP-based quality validation
@@ -25,21 +26,31 @@
 │   ├── wan21/                     #   Wan 2.1 (T2V, hybrid schedule)
 │   ├── longlive/                  #   LongLive (AR long video)
 │   ├── ltx_video/                 #   LTX-Video (fast DiT)
+│   ├── dreamdojo/                 #   DreamDojo (action-conditioned Video2World)
 │   └── inferix/                   #   Inferix (reference patterns)
-├── weights/                       # Model weights (~140GB)
+├── weights/                       # Model weights (~140GB + DreamDojo)
 │   ├── wan21/                     #   Wan2.1-T2V-1.3B, Wan2.1-T2V-14B
 │   ├── longlive/                  #   Wan base + LongLive LoRA
 │   └── ltx_video/                 #   ltxv-2b, ltxv-13b distilled
+│   (DreamDojo weights stored in models/dreamdojo/checkpoints/)
 ├── envs/                          # Portable conda environments
 │   ├── af-wan21/
 │   ├── af-longlive/
-│   └── af-ltx/
+│   ├── af-ltx/
+│   └── af-dreamdojo/
 ├── outputs/                       # Generated videos
 │   └── ui/                        #   Videos generated via the UI (per job-id)
 ├── requirements.txt               # Python deps for orchestrator
-└── docs/
-    ├── ARCHITECTURE.md            # Architecture + design decisions
-    └── CODEBASE.md                # This file
+├── docs/
+│   ├── ARCHITECTURE.md            # Architecture + design decisions
+│   ├── CODEBASE.md                # This file
+│   ├── ENVIRONMENT_SETUP.md       # Environment setup guide
+│   └── models/                    # Per-model architecture deep-dives
+│       ├── wan21.md
+│       ├── longlive.md
+│       ├── ltx_video.md
+│       └── dreamdojo.md
+└── benchmarks/                    # Benchmark scripts
 ```
 
 ---
