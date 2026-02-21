@@ -10,3 +10,6 @@
 [submodule "models/longlive"]
 	path = models/longlive
 	url = https://github.com/athulramkumar/LongLive.git
+[submodule "models/dreamdojo"]
+	path = models/dreamdojo
+	url = https://github.com/athulramkumar/DreamDojo.git
